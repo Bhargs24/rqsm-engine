@@ -11,6 +11,13 @@ from pathlib import Path
 
 from app.config import settings
 from app import __version__
+from app.session.runtime import ConversationRuntime
+from app.api.models import (
+    SessionCreateResponse, StartConversationResponse, UserMessageRequest,
+    UserMessageResponse, InterruptRequest, InterruptResponse,
+    InterruptMessageRequest, InterruptMessageResponse, ResumeRequest,
+    ResumeResponse, NextUnitRequest, NextUnitResponse, SessionStateResponse
+)
 
 
 # Configure logging
@@ -121,6 +128,148 @@ async def get_config():
             "session_timeout_minutes": settings.session_timeout_minutes
         }
     }
+
+
+# Initialize conversation runtime singleton
+_runtime = ConversationRuntime()
+
+
+# ============================================================================
+# Session Management Endpoints
+# ============================================================================
+
+@app.post("/sessions/document", response_model=SessionCreateResponse)
+async def create_session_from_document(file: UploadFile = File(...)):
+    """
+    Upload a document and create a new conversation session.
+    Returns session_id for use in subsequent requests.
+    """
+    try:
+        contents = await file.read()
+        session_id = _runtime.create_session_from_uploaded_file(
+            filename=file.filename,
+            file_contents=contents
+        )
+        logger.info(f"Created session {session_id} from document {file.filename}")
+        return SessionCreateResponse(
+            session_id=session_id,
+            filename=file.filename,
+            status="ready"
+        )
+    except Exception as e:
+        logger.error(f"Error creating session: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/sessions/{session_id}/start", response_model=StartConversationResponse)
+async def start_conversation(session_id: str):
+    """
+    Start the conversation for a session. Assigns roles and initializes state machine.
+    """
+    try:
+        response = _runtime.start_conversation(session_id)
+        logger.info(f"Started conversation for session {session_id}")
+        return StartConversationResponse(**response)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    except Exception as e:
+        logger.error(f"Error starting conversation: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/sessions/{session_id}/message", response_model=UserMessageResponse)
+async def send_user_message(session_id: str, request: UserMessageRequest):
+    """
+    Send a user message and get bot response.
+    """
+    try:
+        response = _runtime.send_user_message(session_id, request.message)
+        return UserMessageResponse(**response)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/sessions/{session_id}/interrupt", response_model=InterruptResponse)
+async def interrupt_conversation(session_id: str, request: InterruptRequest = None):
+    """
+    Interrupt the current topic. User can then ask a question.
+    """
+    try:
+        response = _runtime.interrupt(session_id)
+        logger.info(f"Interrupted session {session_id}")
+        return InterruptResponse(**response)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    except Exception as e:
+        logger.error(f"Error interrupting: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/sessions/{session_id}/interrupt/message", response_model=InterruptMessageResponse)
+async def answer_interruption_question(session_id: str, request: InterruptMessageRequest):
+    """
+    Answer an interruption question and get bot response.
+    """
+    try:
+        response = _runtime.answer_interruption(session_id, request.message)
+        return InterruptMessageResponse(**response)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    except Exception as e:
+        logger.error(f"Error answering interruption: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/sessions/{session_id}/resume", response_model=ResumeResponse)
+async def resume_conversation(session_id: str, request: ResumeRequest):
+    """
+    Resume conversation after interruption.
+    from_start=True: restart this topic
+    from_start=False: continue from where we left off
+    """
+    try:
+        response = _runtime.resume(session_id, request.from_start)
+        logger.info(f"Resumed session {session_id} (from_start={request.from_start})")
+        return ResumeResponse(**response)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    except Exception as e:
+        logger.error(f"Error resuming: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/sessions/{session_id}/next", response_model=NextUnitResponse)
+async def advance_to_next_unit(session_id: str, request: NextUnitRequest = None):
+    """
+    Advance conversation to the next topic/unit.
+    """
+    try:
+        response = _runtime.advance_to_next_unit(session_id)
+        logger.info(f"Advanced session {session_id} to next unit")
+        return NextUnitResponse(**response)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    except Exception as e:
+        logger.error(f"Error advancing to next unit: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/sessions/{session_id}", response_model=SessionStateResponse)
+async def get_session_state(session_id: str):
+    """
+    Get the current state of a session.
+    """
+    try:
+        state = _runtime.get_session_state(session_id)
+        return SessionStateResponse(**state)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    except Exception as e:
+        logger.error(f"Error getting session state: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 if __name__ == "__main__":

@@ -41,6 +41,12 @@ class UserMessageResponse(BaseModel):
     state: Dict[str, Any]
 
 
+class InterruptRequest(BaseModel):
+    """Optional payload for interrupt action."""
+
+    pass
+
+
 class InterruptResponse(BaseModel):
     """Result of clicking interrupt in UI."""
 
@@ -73,9 +79,24 @@ class ResumeResponse(BaseModel):
 
     session_id: str
     success: bool
-    message: str
+    message: Optional[str] = None
     resuming_from_unit: Optional[int] = None
+    unit_index: Optional[int] = None
+    role: Optional[str] = None
+    response: Optional[str] = None
     state: Dict[str, Any]
+
+
+class ResumeRequest(BaseModel):
+    """Resume payload with restart option for current topic."""
+
+    from_start: bool = False
+
+
+class NextUnitRequest(BaseModel):
+    """Optional payload for advancing to next unit."""
+
+    pass
 
 
 class NextUnitResponse(BaseModel):

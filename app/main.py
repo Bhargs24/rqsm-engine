@@ -145,16 +145,14 @@ async def create_session_from_document(file: UploadFile = File(...)):
     Returns session_id for use in subsequent requests.
     """
     try:
-        contents = await file.read()
-        session_id = _runtime.create_session_from_uploaded_file(
-            filename=file.filename,
-            file_contents=contents
-        )
-        logger.info(f"Created session {session_id} from document {file.filename}")
+        session = _runtime.create_session_from_uploaded_file(file)
+        logger.info(f"Created session {session.session_id} from document {file.filename}")
         return SessionCreateResponse(
-            session_id=session_id,
-            filename=file.filename,
-            status="ready"
+            session_id=session.session_id,
+            filename=session.filename,
+            total_units=session.state_machine.context.total_units,
+            roles_assigned=len(session.assignments_by_position),
+            state=session.state_machine.get_state_summary(),
         )
     except Exception as e:
         logger.error(f"Error creating session: {e}")

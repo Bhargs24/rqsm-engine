@@ -181,11 +181,36 @@ class ConversationRuntime:
             "state": sm.get_state_summary(),
         }
 
-    def resume(self, session_id: str) -> Dict:
-        """Resume after interruption."""
+    def resume(self, session_id: str, from_start: bool = False) -> Dict:
+        """Resume after interruption, with optional restart of current unit."""
         session = self.get_session(session_id)
-        result = session.state_machine.resume_conversation()
-        result["state"] = session.state_machine.get_state_summary()
+        sm = session.state_machine
+
+        if from_start and sm.context.interrupted_at_index is not None:
+            sm.context.current_unit_index = sm.context.interrupted_at_index
+
+        result = sm.resume_conversation()
+        if not result.get("success", False):
+            result["state"] = sm.get_state_summary()
+            result["session_id"] = session_id
+            return result
+
+        assignment = self._current_assignment(session)
+        sm.start_bot_response()
+        response = self._generate_response(assignment.role_template, assignment.semantic_unit.text)
+        sm.context.current_role = assignment.assigned_role.value
+        sm.transition(EventType.BOT_RESPONSE, {"type": "resume"})
+        sm.finish_bot_response()
+
+        result["message"] = (
+            "Restarted current topic from the beginning."
+            if from_start
+            else "Resumed from where we left off."
+        )
+        result["unit_index"] = sm.context.current_unit_index
+        result["role"] = assignment.assigned_role.value
+        result["response"] = response
+        result["state"] = sm.get_state_summary()
         result["session_id"] = session_id
         return result
 

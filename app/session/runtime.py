@@ -508,8 +508,10 @@ class ConversationRuntime:
             f"interruptions={summary.get('interruptions')}, messages={summary.get('messages')}"
         )
 
-    # Hard cap on response length so replies feel like chat, not a lecture.
-    MAX_RESPONSE_CHARS = 700
+    # Cap on response length. We want actual teaching turns (multiple
+    # sentences of explanation, not one-liners), so this is sized for a real
+    # mini-lesson paragraph rather than a chat one-liner.
+    MAX_RESPONSE_CHARS = 1400
 
     # ──────────────────────────────────────────────────────────────────────
     # Group conversation generators
@@ -529,11 +531,20 @@ class ConversationRuntime:
         speakers = assignment.speaker_order()[: self.OPENER_SPEAKERS]
         other_names_full = [role_library.get_role(r).name for r in speakers]
         messages: List[Dict[str, str]] = []
+        last_idx = len(speakers) - 1
 
         for idx, role_type in enumerate(speakers):
             template = role_library.get_role(role_type)
             other_names = [n for n in other_names_full if n != template.name]
-            style = "open" if idx == 0 else "chime"
+            # The LAST voice in the opener hands the mic to the student with a
+            # direct question — otherwise the group just trails off and the
+            # student is left guessing whose turn it is.
+            if idx == 0:
+                style = "open"
+            elif idx == last_idx:
+                style = "chime_closer"
+            else:
+                style = "chime"
             text = self._generate_response_with_style(
                 template,
                 assignment.semantic_unit.text,

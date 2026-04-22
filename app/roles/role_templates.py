@@ -85,6 +85,10 @@ class RoleTemplate:
               - "open"   : you open this topic (2-3 sentences + small hook).
               - "chime"  : you chime in right after another role spoke. React
                            in 1-2 sentences, possibly naming them.
+              - "chime_closer" : you are the LAST voice in a group opener.
+                           React briefly AND hand the conversation to the
+                           student with a direct question — they need to know
+                           it's their turn.
               - "reply"  : you reply to the student's most recent message as
                            the primary responder (2-4 sentences).
               - "reply_chime" : you chime in briefly after the primary replied
@@ -145,19 +149,40 @@ class RoleTemplate:
             parts.extend(
                 [
                     "",
-                    f"Open this topic as {self.name}. Two or three short sentences. Stay in your "
-                    "role. End by leaving a small conversational thread the next voice (or the "
-                    "student) can pick up — either a question or a light invitation.",
+                    f"You are the FIRST voice of a structured mini-lesson on this topic. "
+                    f"Speak as {self.name}. Actually TEACH the concept — do not just open a "
+                    "conversation. Write FOUR to SIX sentences of plain, substantive prose:\n"
+                    "  - Start by stating clearly what this topic is.\n"
+                    "  - Explain how it works and why it matters, using concrete details from "
+                    "the study material above.\n"
+                    "  - If a short everyday touchpoint genuinely clarifies it, use ONE.\n"
+                    "Do NOT end with 'make sense?' or any hand-off question — other voices will "
+                    "build on what you said. End on a complete statement.",
                 ]
             )
         elif reply_style == "chime":
             parts.extend(
                 [
                     "",
-                    f"You are chiming in right after the previous voice. Speak as {self.name} for "
-                    "ONE or TWO short sentences that react to what was just said. "
-                    "Do NOT re-explain the topic. If it fits naturally, address the previous voice "
-                    "by name. Finish on a complete sentence.",
+                    f"You are the next voice in a structured mini-lesson — the previous voice has "
+                    f"already spoken (see above). Speak as {self.name} and add YOUR role's "
+                    "specific teaching contribution: extend the lesson, do not react to it. "
+                    "Write TWO to FOUR sentences of substantive prose drawn from the study "
+                    "material. Do NOT repeat what the previous voice already said, do NOT hand "
+                    "the floor to the student (a later voice does that). End on a complete "
+                    "statement, not a question.",
+                ]
+            )
+        elif reply_style == "chime_closer":
+            parts.extend(
+                [
+                    "",
+                    f"You are the LAST voice of this mini-lesson — the student speaks next. "
+                    f"Speak as {self.name}. First, in ONE or TWO sentences, add your role's "
+                    "contribution to what was taught (a sharp nuance, a quick misconception "
+                    "warning, a crisp recap — whatever fits your role). Then, in ONE more "
+                    "sentence, hand the floor to the student with a direct question they can "
+                    "actually answer. End with a question mark so it is obvious it is their turn.",
                 ]
             )
         elif reply_style == "reply":
@@ -222,9 +247,9 @@ class RoleTemplateLibrary:
                 "table from the student, not reading from a textbook."
             ),
             instruction=(
-                "Explain the core idea in plain words. One main point per turn, not a whole overview. "
-                "If a quick everyday comparison helps, use one short one. End by leaving a small "
-                "opening for the student (e.g. 'make sense so far?')."
+                "Teach the core idea in plain, substantive language. Explain what it is, how it "
+                "works, and why it matters, pulling specific details directly from the study "
+                "material. You are not a chatbot reacting — you are the teacher opening a lesson."
             ),
             priority_keywords=[
                 "explain", "definition", "meaning",
@@ -236,7 +261,7 @@ class RoleTemplateLibrary:
                 "misconception", "mistake", "error", "summary", "overview"
             ],
             temperature=0.6,
-            max_tokens=180,
+            max_tokens=380,
             metadata={
                 "color": "#4CAF50",
                 "icon": "💡",
@@ -254,9 +279,10 @@ class RoleTemplateLibrary:
                 "pokes at ideas to see if they hold up. You sound curious, never sarcastic."
             ),
             instruction=(
-                "Pick one soft spot in what the student said (or in the topic) and ask one "
-                "pointed question about it. Don't list multiple questions. Keep it warm and "
-                "short — you're prodding, not interrogating."
+                "Surface one non-obvious angle on this topic — a boundary condition, a trade-off, "
+                "an assumption that could break, or a subtle distinction easy to miss. Explain it "
+                "clearly so the student actually learns something deeper, don't just ask a "
+                "question. When it IS your turn to close the lesson, end with a real question."
             ),
             priority_keywords=[
                 "limitation", "limitations", "edge case", "alternative",
@@ -269,7 +295,7 @@ class RoleTemplateLibrary:
                 "misconception", "mistake", "basic", "simple"
             ],
             temperature=0.6,
-            max_tokens=160,
+            max_tokens=320,
             metadata={
                 "color": "#FF9800",
                 "icon": "🤔",
@@ -287,8 +313,9 @@ class RoleTemplateLibrary:
                 "compress an idea into the one line that actually matters."
             ),
             instruction=(
-                "State the core takeaway in one or two plain sentences. No lists, no recaps "
-                "of every subpoint. End with a short check-in like 'does that track?'."
+                "Consolidate what the other voices just taught into the one clear takeaway "
+                "a learner should walk away with. Two or three crisp sentences of plain prose — "
+                "no bullet lists, no 'does that track?'. Pull the thread together."
             ),
             priority_keywords=[
                 "summary", "summarize", "overview", "key points", "main idea",
@@ -300,7 +327,7 @@ class RoleTemplateLibrary:
                 "example", "instance", "misconception", "elaborate"
             ],
             temperature=0.5,
-            max_tokens=140,
+            max_tokens=300,
             metadata={
                 "color": "#2196F3",
                 "icon": "📋",
@@ -318,9 +345,10 @@ class RoleTemplateLibrary:
                 "drops a quick 'oh, like when…' example to make the abstract idea click."
             ),
             instruction=(
-                "Give ONE concrete, everyday example that illustrates the idea. Don't list "
-                "several. Keep it to a sentence or two, then ask if that fits what they had "
-                "in mind."
+                "Anchor the idea with ONE vivid, concrete example — either from everyday life "
+                "or drawn directly from the study material. Two or three sentences: describe the "
+                "example, then show precisely how it maps back to the concept. Make the abstract "
+                "concrete. Do not ask the student a question."
             ),
             priority_keywords=[
                 "example", "instance", "case", "application", "use case",
@@ -332,7 +360,7 @@ class RoleTemplateLibrary:
                 "summarize", "overview", "misconception", "mistake"
             ],
             temperature=0.7,
-            max_tokens=160,
+            max_tokens=320,
             metadata={
                 "color": "#9C27B0",
                 "icon": "💼",
@@ -350,8 +378,9 @@ class RoleTemplateLibrary:
                 "who notices when something sounds almost right but isn't, and gently corrects it."
             ),
             instruction=(
-                "Name ONE specific thing people commonly get wrong about this topic, then "
-                "give the quick correction. Keep the tone kind and casual, not preachy."
+                "Name ONE specific thing learners commonly get wrong about this topic, explain "
+                "why it is a natural mistake, and then state the correct understanding clearly. "
+                "Two or three sentences, grounded in the material — not preachy, but precise."
             ),
             priority_keywords=[
                 "misconception", "misconceptions", "mistake", "error", "confuse", "wrong",
@@ -362,7 +391,7 @@ class RoleTemplateLibrary:
                 "example", "summarize", "overview", "detail", "explain how"
             ],
             temperature=0.55,
-            max_tokens=160,
+            max_tokens=320,
             metadata={
                 "color": "#F44336",
                 "icon": "⚠️",

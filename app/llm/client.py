@@ -4,6 +4,7 @@ Supports: Hugging Face (FREE), Ollama (FREE), Gemini (FREE), OpenAI (PAID)
 """
 from typing import Optional, Dict, Any
 from abc import ABC, abstractmethod
+import time
 import requests
 from loguru import logger
 
@@ -83,13 +84,15 @@ class OllamaLLM(LLMProvider):
         payload = {
             "model": self.model,
             "prompt": prompt,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
             "stream": False
         }
         
         try:
-            response = requests.post(url, json=payload, timeout=60)
+            response = requests.post(url, json=payload, timeout=120)
             response.raise_for_status()
             
             result = response.json()
@@ -106,41 +109,46 @@ class OllamaLLM(LLMProvider):
 class GeminiLLM(LLMProvider):
     """
     Google Gemini Provider (FREE tier - 1,500 requests/day)
-    Get API key: https://makersuite.google.com/app/apikey
+    Get API key: https://aistudio.google.com/app/apikey
     """
     
     def __init__(self, api_key: str, model: str):
         self.api_key = api_key
         self.model = model
         
-        # Import here to make it optional
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=api_key)
-            self.client = genai.GenerativeModel(model)
+            from google import genai
+            self.client = genai.Client(api_key=api_key)
             logger.info(f"Initialized Google Gemini LLM: {model}")
         except ImportError:
-            logger.error("google-generativeai not installed. Run: pip install google-generativeai")
+            logger.error("google-genai not installed. Run: pip install google-genai")
             raise
     
     def generate(self, prompt: str, temperature: float = 0.0, max_tokens: int = 500) -> str:
-        """Generate text using Google Gemini"""
-        try:
-            generation_config = {
-                "temperature": temperature,
-                "max_output_tokens": max_tokens,
-            }
-            
-            response = self.client.generate_content(
-                prompt,
-                generation_config=generation_config
-            )
-            
-            return response.text
-            
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            raise
+        """Generate text using Google Gemini with retry for rate limits."""
+        from google.genai import types
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        max_output_tokens=max_tokens,
+                    ),
+                )
+                return response.text
+            except Exception as e:
+                error_str = str(e)
+                is_rate_limit = "429" in error_str or "RESOURCE_EXHAUSTED" in error_str
+                if is_rate_limit and attempt < max_retries - 1:
+                    wait = 2 ** (attempt + 1)  # 2s, 4s
+                    logger.warning(f"Gemini rate limited, retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait)
+                    continue
+                logger.error(f"Gemini API error: {e}")
+                raise
 
 
 class OpenAILLM(LLMProvider):

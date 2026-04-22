@@ -35,16 +35,36 @@ class RoleScore:
 
 @dataclass
 class RoleAssignment:
-    """Assignment of a role to a semantic unit"""
+    """Assignment of roles to a semantic unit.
+
+    For the study-group conversation model, each unit has:
+      - `assigned_role` = primary "owner" of the topic (opens the discussion,
+        takes the first reply slot on user messages)
+      - `chime_in_roles` = up to 2 secondary roles ranked by score, used for
+        opener chime-ins and for the short second voice on user replies.
+
+    Deterministic: speakers are picked by sorting all 5 roles by total score
+    descending, with alphabetical tie-breaking on role name.
+    """
     semantic_unit: SemanticUnit
     assigned_role: RoleType
     role_template: RoleTemplate
     score: RoleScore
     confidence: float  # 0.0-1.0
-    
+    chime_in_roles: List[RoleType] = None  # top-N runner-ups (len 0..2)
+
+    def __post_init__(self):
+        if self.chime_in_roles is None:
+            self.chime_in_roles = []
+
+    def speaker_order(self) -> List[RoleType]:
+        """Full speaker list for the topic opener: primary + chime-ins."""
+        return [self.assigned_role, *self.chime_in_roles]
+
     def __repr__(self) -> str:
+        chime = ",".join(r.value for r in self.chime_in_roles) or "-"
         return (f"RoleAssignment({self.assigned_role.value} -> Unit {self.semantic_unit.id}, "
-                f"conf={self.confidence:.2f})")
+                f"conf={self.confidence:.2f}, chime_ins=[{chime}])")
 
 
 class RoleScorer:
@@ -376,6 +396,24 @@ class RoleAssigner:
         logger.info(f"Assigned roles to {len(assignments)} semantic units")
         return assignments
     
+    @staticmethod
+    def _pick_chime_ins(
+        unit_scores: Dict[RoleType, RoleScore],
+        primary_role: RoleType,
+        count: int = 2,
+    ) -> List[RoleType]:
+        """Pick the top-`count` chime-in roles for a unit, excluding the primary.
+
+        Deterministic ranking: higher total_score first; alphabetical on role
+        name for tie-breaking. Chime-ins are *capped at 2* so a topic opener is
+        at most 3 voices (owner + 2).
+        """
+        candidates = [r for r in unit_scores.keys() if r != primary_role]
+        candidates.sort(
+            key=lambda r: (-unit_scores[r].total_score, r.value),
+        )
+        return candidates[:count]
+
     def _assign_greedy(
         self,
         semantic_units: List[SemanticUnit],
@@ -383,38 +421,28 @@ class RoleAssigner:
     ) -> List[RoleAssignment]:
         """
         Greedy assignment: assign best-scoring role to each unit.
-        
-        Args:
-            semantic_units: List of units
-            all_scores: Scores for all units and roles
-            
-        Returns:
-            List of role assignments
+
+        Also attaches the top-2 runner-up roles as chime-in speakers for the
+        topic opener.
         """
         assignments = []
-        
+
         for unit in semantic_units:
             unit_scores = all_scores[unit.id]
-            
-            # Find best role
             best_role = max(unit_scores.keys(), key=lambda r: unit_scores[r].total_score)
             best_score = unit_scores[best_role]
-            
-            # Compute confidence (normalized score)
-            confidence = best_score.total_score
-            
-            # Get role template
             template = role_library.get_role(best_role)
-            
+
             assignment = RoleAssignment(
                 semantic_unit=unit,
                 assigned_role=best_role,
                 role_template=template,
                 score=best_score,
-                confidence=confidence
+                confidence=best_score.total_score,
+                chime_in_roles=self._pick_chime_ins(unit_scores, best_role, count=2),
             )
             assignments.append(assignment)
-        
+
         return assignments
     
     def _assign_with_balancing(
@@ -444,12 +472,35 @@ class RoleAssigner:
             RoleType.MISCONCEPTION_SPOTTER: 0.15
         }
         
-        # Track role counts
+        # Track role counts and assigned units
         role_counts = {role: 0 for role in RoleType}
+        assigned_unit_ids = set()
         
-        # Create list of (unit, best_role, score) tuples
+        # PEDAGOGICAL CONSTRAINT: Force first unit (position 0) to Explainer
+        first_unit = next((u for u in semantic_units if u.position == 0), None)
+        if first_unit:
+            template = role_library.get_role(RoleType.EXPLAINER)
+            score = all_scores[first_unit.id][RoleType.EXPLAINER]
+            assignment = RoleAssignment(
+                semantic_unit=first_unit,
+                assigned_role=RoleType.EXPLAINER,
+                role_template=template,
+                score=score,
+                confidence=score.total_score,
+                chime_in_roles=self._pick_chime_ins(
+                    all_scores[first_unit.id], RoleType.EXPLAINER, count=2
+                ),
+            )
+            assignments.append(assignment)
+            role_counts[RoleType.EXPLAINER] += 1
+            assigned_unit_ids.add(first_unit.id)
+            logger.info("First unit (position 0) assigned to Explainer (pedagogical constraint)")
+        
+        # Create list of (unit, best_role, score) tuples for remaining units
         unit_preferences = []
         for unit in semantic_units:
+            if unit.id in assigned_unit_ids:
+                continue  # Skip already assigned
             unit_scores = all_scores[unit.id]
             best_role = max(unit_scores.keys(), key=lambda r: unit_scores[r].total_score)
             best_score = unit_scores[best_role]
@@ -458,13 +509,13 @@ class RoleAssigner:
         # Sort by score (highest first)
         unit_preferences.sort(key=lambda x: x[2].total_score, reverse=True)
         
-        # Assign roles with balancing
+        # Assign roles with balancing for remaining units
         for unit, preferred_role, score in unit_preferences:
             # Check if preferred role is over-allocated
             current_ratio = role_counts[preferred_role] / max(len(assignments), 1)
             target_ratio = target_ratios[preferred_role]
             
-            if current_ratio <= target_ratio or len(assignments) == 0:
+            if current_ratio <= target_ratio:
                 # Assign preferred role
                 assigned_role = preferred_role
             else:
@@ -486,13 +537,16 @@ class RoleAssigner:
             # Create assignment
             final_score = all_scores[unit.id][assigned_role]
             template = role_library.get_role(assigned_role)
-            
+
             assignment = RoleAssignment(
                 semantic_unit=unit,
                 assigned_role=assigned_role,
                 role_template=template,
                 score=final_score,
-                confidence=final_score.total_score
+                confidence=final_score.total_score,
+                chime_in_roles=self._pick_chime_ins(
+                    all_scores[unit.id], assigned_role, count=2
+                ),
             )
             assignments.append(assignment)
             role_counts[assigned_role] += 1

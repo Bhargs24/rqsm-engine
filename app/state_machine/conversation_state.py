@@ -446,6 +446,7 @@ class ConversationStateMachine:
                 'percentage': (self.context.current_unit_index / self.context.total_units * 100) 
                              if self.context.total_units > 0 else 0
             },
+            'current_role': self.context.current_role,
             'interruptions': self.context.interruption_count,
             'messages': self.context.message_count,
             'can_interrupt': self.context.current_state == ConversationState.ENGAGED,

@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     
     # Google Gemini (FREE tier)
     gemini_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
-    gemini_model: str = Field(default="gemini-pro", alias="GEMINI_MODEL")
+    gemini_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_MODEL")
     
     # OpenAI (PAID - optional)
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")

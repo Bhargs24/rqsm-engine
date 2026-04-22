@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from loguru import logger
+import asyncio
 import sys
 from pathlib import Path
 
@@ -46,8 +47,8 @@ async def lifespan(app: FastAPI):
     logger.info(f"Starting RQSM-Engine v{__version__}")
     logger.info(f"Environment: {settings.app_env}")
     logger.info(f"Debug mode: {settings.app_debug}")
-    logger.info(f"LLM Model: {settings.openai_model}")
-    logger.info(f"Database: {settings.database_url}")
+    logger.info(f"LLM Provider: {settings.llm_provider}")
+    logger.info(f"Temperature: {settings.llm_temperature}")
     logger.info("=" * 60)
     
     # Ensure required directories exist
@@ -110,9 +111,9 @@ async def health_check():
 async def get_config():
     """Get current configuration (non-sensitive values only)"""
     return {
-        "llm_model": settings.openai_model,
-        "llm_temperature": settings.openai_temperature,
-        "llm_max_tokens": settings.openai_max_tokens,
+        "llm_provider": settings.llm_provider,
+        "llm_temperature": settings.llm_temperature,
+        "llm_max_tokens": settings.llm_max_tokens,
         "role_score_weights": {
             "alpha": settings.role_score_alpha,
             "beta": settings.role_score_beta,
@@ -145,14 +146,41 @@ async def create_session_from_document(file: UploadFile = File(...)):
     Returns session_id for use in subsequent requests.
     """
     try:
-        session = _runtime.create_session_from_uploaded_file(file)
+        logger.info(f"Upload endpoint received: {file.filename}")
+        session = await asyncio.to_thread(_runtime.create_session_from_uploaded_file, file)
         logger.info(f"Created session {session.session_id} from document {file.filename}")
+        summary = session.document_summary or {}
+        section_counts = {
+            section_name: section_data.get("count", 0)
+            for section_name, section_data in summary.get("sections", {}).items()
+        }
+
+        unit_previews = []
+        for unit in session.semantic_units[:3]:
+            preview_text = " ".join(unit.text.split())[:220]
+            unit_previews.append(
+                {
+                    "index": unit.position,
+                    "title": unit.title or "Untitled",
+                    "word_count": unit.word_count,
+                    "section_type": unit.document_section,
+                    "preview": preview_text,
+                }
+            )
+
         return SessionCreateResponse(
             session_id=session.session_id,
             filename=session.filename,
             total_units=session.state_machine.context.total_units,
             roles_assigned=len(session.assignments_by_position),
             state=session.state_machine.get_state_summary(),
+            insights={
+                "total_words": int(summary.get("total_words", 0)),
+                "avg_words_per_unit": float(summary.get("avg_words_per_unit", 0)),
+                "avg_cohesion": float(summary.get("avg_cohesion", 0)),
+                "sections": section_counts,
+                "unit_previews": unit_previews,
+            },
         )
     except Exception as e:
         logger.error(f"Error creating session: {e}")
@@ -165,8 +193,9 @@ async def start_conversation(session_id: str):
     Start the conversation for a session. Assigns roles and initializes state machine.
     """
     try:
-        response = _runtime.start_conversation(session_id)
-        logger.info(f"Started conversation for session {session_id}")
+        logger.info(f"Starting conversation for session {session_id}...")
+        response = await asyncio.to_thread(_runtime.start_conversation, session_id)
+        logger.info(f"Conversation started for session {session_id}")
         return StartConversationResponse(**response)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
@@ -181,7 +210,8 @@ async def send_user_message(session_id: str, request: UserMessageRequest):
     Send a user message and get bot response.
     """
     try:
-        response = _runtime.send_user_message(session_id, request.message)
+        logger.info(f"User message for session {session_id}: {request.message[:80]}")
+        response = await asyncio.to_thread(_runtime.send_user_message, session_id, request.message)
         return UserMessageResponse(**response)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
@@ -212,7 +242,8 @@ async def answer_interruption_question(session_id: str, request: InterruptMessag
     Answer an interruption question and get bot response.
     """
     try:
-        response = _runtime.answer_interruption(session_id, request.message)
+        logger.info(f"Interruption answer for session {session_id}")
+        response = await asyncio.to_thread(_runtime.answer_interruption, session_id, request.message)
         return InterruptMessageResponse(**response)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
@@ -245,7 +276,8 @@ async def advance_to_next_unit(session_id: str, request: NextUnitRequest = None)
     Advance conversation to the next topic/unit.
     """
     try:
-        response = _runtime.advance_to_next_unit(session_id)
+        logger.info(f"Advancing to next unit for session {session_id}...")
+        response = await asyncio.to_thread(_runtime.advance_to_next_unit, session_id)
         logger.info(f"Advanced session {session_id} to next unit")
         return NextUnitResponse(**response)
     except KeyError:

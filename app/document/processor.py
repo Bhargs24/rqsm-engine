@@ -69,21 +69,48 @@ class DocumentProcessor:
         text = self.loader.load_document(filepath)
         
         if validate_content and not self.loader.validate_content(text):
-            raise ValueError(f"Document content too short or empty: {filepath}")
+            logger.error(f"No extractable text in {filepath}. If this is a scanned PDF, it needs OCR.")
+            raise ValueError(
+                "Could not extract text from this document. "
+                "If it's a scanned PDF (images of text), it needs OCR support which is not available. "
+                "Please upload a text-based PDF or a .txt file."
+            )
         
         logger.info(f"Document loaded: {len(text)} characters")
         
         # Stage 2: Detect headings
         headings = self.heading_detector.detect_headings(text)
         logger.info(f"Detected {len(headings)} headings")
+        if headings:
+            for idx, heading in enumerate(headings, start=1):
+                logger.info(
+                    f"Heading {idx}: level={heading.level}, line={heading.line_number}, "
+                    f"text='{heading.text[:120]}'"
+                )
+        else:
+            logger.info("No headings detected; continuing with single-section segmentation")
         
         # Stage 3: Split into sections
         sections = self.heading_detector.split_by_headings(text, headings)
         logger.info(f"Split into {len(sections)} sections")
+        for idx, section in enumerate(sections, start=1):
+            section_title = section.get('title') or 'Untitled'
+            section_type = section.get('section_type', 'body')
+            section_chars = len(section.get('text', ''))
+            logger.info(
+                f"Section {idx}: title='{section_title[:120]}', type={section_type}, chars={section_chars}"
+            )
         
         # Stage 4: Segment into semantic units
         semantic_units = self.segmenter.segment_document(text, sections)
         logger.info(f"Created {len(semantic_units)} semantic units")
+        for unit in semantic_units:
+            preview = " ".join(unit.text.split())[:180]
+            logger.info(
+                f"Semantic Unit {unit.id}: position={unit.position}, section={unit.document_section}, "
+                f"words={unit.word_count}, cohesion={unit.similarity_score:.3f}, "
+                f"title='{(unit.title or 'Untitled')[:80]}', preview='{preview}'"
+            )
         
         # Add document metadata
         for unit in semantic_units:

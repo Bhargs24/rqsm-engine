@@ -1,7 +1,40 @@
 """Request and response models for conversational API endpoints."""
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+
+
+class GroupMessage(BaseModel):
+    """One voice's turn inside a group exchange.
+
+    A topic opener typically returns 3 of these (primary + 2 chime-ins); a
+    reply to a user message typically returns 2 (primary reply + 1 chime-in).
+    The frontend renders each as its own role-coloured bubble.
+    """
+
+    role: str
+    text: str
+    is_nudge: bool = False
+
+
+class UnitPreview(BaseModel):
+    """Frontend-friendly snapshot of a semantic unit."""
+
+    index: int
+    title: str
+    word_count: int
+    section_type: str
+    preview: str
+
+
+class DocumentInsights(BaseModel):
+    """Summary of what the processor extracted and segmented."""
+
+    total_words: int
+    avg_words_per_unit: float
+    avg_cohesion: float
+    sections: Dict[str, int]
+    unit_previews: list[UnitPreview]
 
 
 class SessionCreateResponse(BaseModel):
@@ -12,6 +45,7 @@ class SessionCreateResponse(BaseModel):
     total_units: int
     roles_assigned: int
     state: Dict[str, Any]
+    insights: DocumentInsights
 
 
 class StartConversationResponse(BaseModel):
@@ -21,7 +55,9 @@ class StartConversationResponse(BaseModel):
     role: str
     unit_index: int
     total_units: int
-    response: str
+    response: str  # last message's text (back-compat)
+    messages: List[GroupMessage] = Field(default_factory=list)
+    auto_nudge: bool = False
     state: Dict[str, Any]
 
 
@@ -37,7 +73,9 @@ class UserMessageResponse(BaseModel):
     session_id: str
     role: str
     unit_index: int
-    response: str
+    response: str  # last message's text (back-compat)
+    messages: List[GroupMessage] = Field(default_factory=list)
+    auto_nudge: bool = False
     state: Dict[str, Any]
 
 
@@ -70,6 +108,7 @@ class InterruptMessageResponse(BaseModel):
     role: str
     interrupted_unit: int
     response: str
+    messages: List[GroupMessage] = Field(default_factory=list)
     can_resume: bool
     state: Dict[str, Any]
 
@@ -84,6 +123,7 @@ class ResumeResponse(BaseModel):
     unit_index: Optional[int] = None
     role: Optional[str] = None
     response: Optional[str] = None
+    messages: List[GroupMessage] = Field(default_factory=list)
     state: Dict[str, Any]
 
 
@@ -106,8 +146,11 @@ class NextUnitResponse(BaseModel):
     success: bool
     completed: bool
     unit_index: int
+    total_units: Optional[int] = None
     response: Optional[str] = None
     role: Optional[str] = None
+    messages: List[GroupMessage] = Field(default_factory=list)
+    auto_nudge: bool = False
     state: Dict[str, Any]
 
 

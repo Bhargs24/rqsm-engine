@@ -44,7 +44,9 @@ class SemanticSegmenter:
             max_group_size: Maximum paragraphs per group
         """
         logger.info(f"Initializing SemanticSegmenter with model: {model_name}")
+        logger.info("Loading embedding model (this may take a moment on first run)...")
         self.model = SentenceTransformer(model_name)
+        logger.info("Embedding model loaded successfully")
         self.similarity_threshold = similarity_threshold
         self.min_group_size = min_group_size
         self.max_group_size = max_group_size

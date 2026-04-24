@@ -44,6 +44,9 @@ class SessionCreateResponse(BaseModel):
     filename: str
     total_units: int
     roles_assigned: int
+    session_mode: str = "study_group"
+    selected_roles: List[str] = Field(default_factory=list)
+    debate_personas: Optional[List[Dict[str, Any]]] = None
     state: Dict[str, Any]
     insights: DocumentInsights
 
@@ -162,4 +165,7 @@ class SessionStateResponse(BaseModel):
     total_units: int
     current_unit_index: int
     current_role: Optional[str]
+    session_mode: str = "study_group"
+    selected_roles: Optional[List[str]] = None
+    debate_personas: Optional[List[Dict[str, Any]]] = None
     state: Dict[str, Any]

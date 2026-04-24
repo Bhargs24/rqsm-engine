@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     # Google Gemini (FREE tier)
     gemini_api_key: Optional[str] = Field(default=None, alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_MODEL")
+
+    # Google Cloud (TTS, etc.); same env var the Google client libraries read.
+    google_application_credentials: Optional[str] = Field(
+        default=None,
+        alias="GOOGLE_APPLICATION_CREDENTIALS",
+    )
     
     # OpenAI (PAID - optional)
     openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")

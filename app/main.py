@@ -2,13 +2,19 @@
 RQSM-Engine FastAPI Application
 Main entry point for the web service
 """
-from fastapi import FastAPI, HTTPException, UploadFile, File
+import json
+import os
+from functools import partial
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from contextlib import asynccontextmanager
 from loguru import logger
 import asyncio
 import sys
 from pathlib import Path
+from pydantic import BaseModel
 
 from app.config import settings
 from app import __version__
@@ -50,6 +56,20 @@ async def lifespan(app: FastAPI):
     logger.info(f"LLM Provider: {settings.llm_provider}")
     logger.info(f"Temperature: {settings.llm_temperature}")
     logger.info("=" * 60)
+
+    # Point Google SDK at our service-account key if the env-var isn't set yet.
+    creds = (
+        os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        or settings.google_application_credentials
+        or "google_tts_key.json"
+    )
+    if not os.path.isabs(creds):
+        abs_creds = Path(__file__).resolve().parent.parent / creds
+        if abs_creds.exists():
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(abs_creds)
+            logger.info(f"Google TTS credentials: {abs_creds}")
+        else:
+            logger.warning(f"Google TTS key not found at {abs_creds}")
     
     # Ensure required directories exist
     Path("logs").mkdir(exist_ok=True)
@@ -140,14 +160,61 @@ _runtime = ConversationRuntime()
 # ============================================================================
 
 @app.post("/sessions/document", response_model=SessionCreateResponse)
-async def create_session_from_document(file: UploadFile = File(...)):
+async def create_session_from_document(
+    file: UploadFile = File(...),
+    session_mode: str = Form("study_group"),
+    study_role_count: int = Form(5),
+    study_roles: str = Form(""),
+    debate_hint: str = Form(""),
+    debate_preset: str = Form(""),
+):
     """
     Upload a document and create a new conversation session.
     Returns session_id for use in subsequent requests.
+
+    Form fields:
+    - ``session_mode``: ``study_group`` (default) or ``perspective_debate``.
+    - ``study_role_count``: ``2`` or ``5`` when in study-group mode.
+    - ``study_roles``: JSON array of role display names, e.g.
+      ``["Explainer","Challenger"]`` — length must match ``study_role_count``.
+      When empty and count is 5, all five roles are used in default order.
+    - ``debate_hint`` / ``debate_preset``: optional strings to steer the two
+      LLM-authored debate personas (perspective-debate mode).
     """
     try:
-        logger.info(f"Upload endpoint received: {file.filename}")
-        session = await asyncio.to_thread(_runtime.create_session_from_uploaded_file, file)
+        logger.info(f"Upload endpoint received: {file.filename} (mode={session_mode})")
+        roles_list = None
+        raw = (study_roles or "").strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"study_roles must be valid JSON: {exc}"
+                ) from exc
+            if not isinstance(parsed, list):
+                raise HTTPException(status_code=400, detail="study_roles must be a JSON array")
+            roles_list = [str(x) for x in parsed]
+
+        hint_parts = []
+        preset = (debate_preset or "").strip()
+        if preset:
+            hint_parts.append(preset)
+        dh = (debate_hint or "").strip()
+        if dh:
+            hint_parts.append(dh)
+        combined_hint = ". ".join(hint_parts) if hint_parts else ""
+
+        session = await asyncio.to_thread(
+            partial(
+                _runtime.create_session_from_uploaded_file,
+                file,
+                session_mode=session_mode,
+                study_role_count=study_role_count,
+                study_roles=roles_list,
+                debate_hint=combined_hint,
+            )
+        )
         logger.info(f"Created session {session.session_id} from document {file.filename}")
         summary = session.document_summary or {}
         section_counts = {
@@ -168,11 +235,29 @@ async def create_session_from_document(file: UploadFile = File(...)):
                 }
             )
 
+        sel: list = []
+        if session.study_pool:
+            sel = [r.value for r in session.study_pool]
+        debate_info = None
+        if session.debate_personas:
+            debate_info = []
+            for p in session.debate_personas:
+                meta = p.metadata if isinstance(p.metadata, dict) else {}
+                debate_info.append(
+                    {
+                        "name": p.name,
+                        "viewpoint": meta.get("viewpoint_label"),
+                    }
+                )
+
         return SessionCreateResponse(
             session_id=session.session_id,
             filename=session.filename,
             total_units=session.state_machine.context.total_units,
             roles_assigned=len(session.assignments_by_position),
+            session_mode=session.session_mode,
+            selected_roles=sel,
+            debate_personas=debate_info,
             state=session.state_machine.get_state_summary(),
             insights={
                 "total_words": int(summary.get("total_words", 0)),
@@ -182,6 +267,8 @@ async def create_session_from_document(file: UploadFile = File(...)):
                 "unit_previews": unit_previews,
             },
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating session: {e}")
         raise HTTPException(status_code=400, detail=str(e))
@@ -300,6 +387,51 @@ async def get_session_state(session_id: str):
     except Exception as e:
         logger.error(f"Error getting session state: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================================
+# Text-to-Speech Endpoint
+# ============================================================================
+
+class TTSSynthesizeRequest(BaseModel):
+    text: str
+    role: str = "Explainer"
+    # For debate personas: position in the debate (0 or 1).  Guarantees the
+    # two debaters always get different voices regardless of name hash collisions.
+    persona_index: int | None = None
+
+
+@app.post("/tts/synthesize")
+async def synthesize_speech(req: TTSSynthesizeRequest):
+    """
+    Synthesize speech for ``text`` using the voice assigned to ``role``.
+
+    Returns raw MP3 audio bytes (``audio/mpeg``).  Results are cached in-process
+    so repeated calls for the same (role, text) pair are cheap.
+
+    Roles supported: Explainer, Challenger, Summarizer, Example-Generator,
+    Misconception-Spotter.  Any other name (e.g. debate persona) is routed to a
+    voice from the debate-accent pool via deterministic hash.
+    """
+    if not req.text or not req.text.strip():
+        raise HTTPException(status_code=400, detail="text must not be empty")
+
+    from app.tts.service import get_tts_service
+
+    try:
+        svc = get_tts_service()
+        mp3_bytes = await asyncio.to_thread(svc.synthesize, req.text, req.role, req.persona_index)
+        return Response(
+            content=mp3_bytes,
+            media_type="audio/mpeg",
+            headers={
+                "Cache-Control": "public, max-age=3600",
+                "Content-Length": str(len(mp3_bytes)),
+            },
+        )
+    except Exception as exc:
+        logger.error(f"TTS synthesis error for role={req.role!r}: {exc}")
+        raise HTTPException(status_code=500, detail=f"TTS error: {exc}")
 
 
 if __name__ == "__main__":

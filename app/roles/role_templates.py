@@ -20,18 +20,20 @@ class RoleType(Enum):
 @dataclass
 class RoleTemplate:
     """
-    Template for a pedagogical role.
-    
+    Template for a pedagogical role (or a debate persona).
+
     Attributes:
-        name: Role name (e.g., "Explainer")
-        role_type: RoleType enum value
+        name: Role name (e.g., "Explainer" or a debate persona name)
+        role_type: RoleType enum value (reused as an enum handle for debate personas)
         system_prompt: Base system prompt for the role
         instruction: Specific instructions for generating responses
-        priority_keywords: Keywords that indicate this role should be prioritized
+        priority_keywords: Keywords that indicate this role should be prioritised
         avoid_keywords: Keywords that indicate this role should be avoided
         temperature: Suggested temperature for generation (0.0-1.0)
         max_tokens: Suggested max tokens for responses
         metadata: Additional role-specific metadata
+        is_debate: When True, build_prompt uses debate framing instead of
+                   pedagogical mini-lesson framing.  Set by debate_synthesis.py.
     """
     name: str
     role_type: RoleType
@@ -42,11 +44,10 @@ class RoleTemplate:
     temperature: float = 0.0
     max_tokens: int = 500
     metadata: Optional[Dict] = None
-    
-    # Hard formatting rules injected into every prompt. The LLM otherwise
-    # defaults to textbook-style markdown output (headings, bullet lists,
-    # bolded terms), which kills the "study group chat" feel.
-    FORMAT_RULES = (
+    is_debate: bool = False
+
+    # ── shared "no markdown" rules ──────────────────────────────────────────
+    _FORMAT_RULES_STUDY = (
         "FORMATTING RULES (follow strictly):\n"
         "- You are ONE voice in a small study group. Speak only as yourself — "
         "do NOT write lines for the Student, the Explainer, the Challenger, or "
@@ -57,6 +58,29 @@ class RoleTemplate:
         "- No preamble like 'Sure!' or 'Great question!'. Just speak.\n"
         "- End your reply on a complete sentence."
     )
+
+    _FORMAT_RULES_DEBATE = (
+        "FORMATTING RULES (follow strictly):\n"
+        "- You are ONE debater in a two-voice debate about a shared text. "
+        "Speak ONLY as yourself — do NOT write lines, reactions, or responses "
+        "for the other debater or for the student. "
+        "Do NOT prefix your reply with your own name. "
+        "Output only your single spoken turn.\n"
+        "- Stay in character as {name} at all times. Every sentence must come "
+        "from your assigned standpoint; do not slip into neutral or omniscient voice.\n"
+        "- Plain prose only. No markdown, no headings (#, ##), no bold (**text**), "
+        "no bullet points, no numbered lists.\n"
+        "- No preamble like 'Sure!' or 'Great question!'. Speak directly.\n"
+        "- Ground every claim in the provided study material. "
+        "Do not invent facts absent from the text.\n"
+        "- End your reply on a complete sentence."
+    )
+
+    @property
+    def FORMAT_RULES(self) -> str:
+        if self.is_debate:
+            return self._FORMAT_RULES_DEBATE.format(name=self.name)
+        return self._FORMAT_RULES_STUDY
 
     def build_prompt(
         self,
@@ -115,15 +139,26 @@ class RoleTemplate:
 
         if other_role_names:
             others = ", ".join(other_role_names)
-            parts.extend(
-                [
-                    "",
-                    f"The other voices in the group right now are: {others}. "
-                    f"You may reference them by name (e.g. '{other_role_names[0]} said X, "
-                    f"but…'). You must NEVER write a line on their behalf. Only speak as "
-                    f"{self.name}.",
-                ]
-            )
+            if self.is_debate:
+                parts.extend(
+                    [
+                        "",
+                        f"The other debater is: {others}. "
+                        f"You may directly address or challenge them by name "
+                        f"(e.g. '{other_role_names[0]} claims X, but from my standpoint…'). "
+                        f"You must NEVER write a line on their behalf. Speak ONLY as {self.name}.",
+                    ]
+                )
+            else:
+                parts.extend(
+                    [
+                        "",
+                        f"The other voices in the group right now are: {others}. "
+                        f"You may reference them by name (e.g. '{other_role_names[0]} said X, "
+                        f"but…'). You must NEVER write a line on their behalf. Only speak as "
+                        f"{self.name}.",
+                    ]
+                )
 
         parts.extend(["", self.instruction, "", "Topic (from the study material):", context.strip()])
 
@@ -137,14 +172,27 @@ class RoleTemplate:
                 if t.get("text")
             ]
             if transcript_lines:
-                parts.extend(
-                    ["", "So far in this discussion (same topic, same turn):", "\n".join(transcript_lines)]
+                label = (
+                    "What the other debater just said (same topic, same turn):"
+                    if self.is_debate
+                    else "So far in this discussion (same topic, same turn):"
                 )
+                parts.extend(["", label, "\n".join(transcript_lines)])
 
         if user_input:
             parts.extend(["", f'The student just said: "{user_input.strip()}"'])
 
-        # Style-specific closing instructions.
+        # ── Style-specific closing instructions ────────────────────────────
+        if self.is_debate:
+            self._append_debate_style(parts, reply_style)
+        else:
+            self._append_study_style(parts, reply_style)
+
+        parts.extend(["", f"{self.name}:"])
+        return "\n".join(parts)
+
+    def _append_study_style(self, parts: List[str], reply_style: str) -> None:
+        """Append study-group style-specific closing instruction."""
         if reply_style == "open":
             parts.extend(
                 [
@@ -215,8 +263,75 @@ class RoleTemplate:
                 ]
             )
 
-        parts.extend(["", f"{self.name}:"])
-        return "\n".join(parts)
+    def _append_debate_style(self, parts: List[str], reply_style: str) -> None:
+        """Append debate-specific style closing instruction."""
+        if reply_style == "open":
+            parts.extend(
+                [
+                    "",
+                    f"You are speaking FIRST on this topic as {self.name}. "
+                    "Present YOUR perspective on this section of the text: what does it mean "
+                    "from your standpoint, why does it matter to your position, and where do "
+                    "you see evidence that supports your view? "
+                    "Write THREE to FIVE sentences of plain, substantive prose grounded "
+                    "directly in the study material above. "
+                    "Do NOT end with a question or hand-off — the other debater will respond next. "
+                    "End on a confident, complete statement.",
+                ]
+            )
+        elif reply_style == "chime":
+            parts.extend(
+                [
+                    "",
+                    f"The other debater has just presented their perspective (see above). "
+                    f"Now speak as {self.name}. Do NOT simply agree or repeat — you represent a "
+                    "DIFFERENT standpoint. In TWO to FOUR sentences: acknowledge what was said, "
+                    "then present the contrasting interpretation or emphasis your position would "
+                    "draw from the same material. Stay grounded in the text. "
+                    "End on a complete statement.",
+                ]
+            )
+        elif reply_style == "chime_closer":
+            parts.extend(
+                [
+                    "",
+                    f"You are the LAST debater to speak before the student weighs in. "
+                    f"Speak as {self.name}. In ONE or TWO sentences, sharpen your contrasting "
+                    "angle — highlight the key tension between your view and the other debater's. "
+                    "Then, in ONE sentence, invite the student to take a position or ask them "
+                    "which argument they find more compelling. End with a question mark.",
+                ]
+            )
+        elif reply_style == "reply":
+            parts.extend(
+                [
+                    "",
+                    f"The student has just spoken. Reply as {self.name} in TWO to FOUR sentences. "
+                    "Address what they said from your specific standpoint — agree where your "
+                    "position supports it, push back where it doesn't. "
+                    "Stay in character. Do not become a neutral tutor. "
+                    "End with a complete thought or a pointed follow-up question.",
+                ]
+            )
+        elif reply_style == "reply_chime":
+            parts.extend(
+                [
+                    "",
+                    f"The other debater has just replied to the student. Now speak as {self.name} "
+                    "for ONE or TWO sentences. Add the contrasting angle your position would "
+                    "bring — do NOT simply agree. You may directly name the other debater if "
+                    "it sharpens the contrast.",
+                ]
+            )
+        elif reply_style == "wrap":
+            parts.extend(
+                [
+                    "",
+                    f"As {self.name}, in ONE short sentence, signal that this particular "
+                    "section has been well-debated and suggest moving on. Stay in character — "
+                    "a brief, natural sign-off, not a neutral facilitator line.",
+                ]
+            )
     
     def __repr__(self) -> str:
         return f"RoleTemplate(name='{self.name}', type={self.role_type.value})"
@@ -492,6 +607,39 @@ class RoleTemplateLibrary:
                 return self._templates[best_role_type]
         
         return None
+
+
+def find_best_among_templates(
+    templates: List[RoleTemplate],
+    text: str,
+    *,
+    fallback: Optional[RoleTemplate] = None,
+) -> Optional[RoleTemplate]:
+    """Like ``find_best_role_for_keywords`` but restricted to a custom template list.
+
+    Used for perspective-debate sessions where speakers are not the fixed five
+    pedagogical roles. When no keyword signal beats zero, returns ``fallback``
+    (or the first template when ``fallback`` is None).
+    """
+    if not templates:
+        return None
+    text_lower = text.lower()
+    best: Optional[RoleTemplate] = None
+    best_score = -10_000
+    for template in templates:
+        score = 0
+        for keyword in template.priority_keywords:
+            if keyword.lower() in text_lower:
+                score += 2
+        for keyword in template.avoid_keywords:
+            if keyword.lower() in text_lower:
+                score -= 1
+        if score > best_score:
+            best_score = score
+            best = template
+    if best is not None and best_score > 0:
+        return best
+    return fallback or templates[0]
 
 
 # Global instance

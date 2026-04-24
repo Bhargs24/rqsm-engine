@@ -12,8 +12,10 @@ from loguru import logger
 from app.document.processor import DocumentProcessor
 from app.document.segmenter import SemanticUnit
 from app.llm.client import LLMClient
-from app.roles.role_assignment import RoleAssignment, RoleAssigner
-from app.roles.role_templates import RoleTemplate, role_library
+from app.roles.debate_synthesis import build_debate_personas_from_llm, render_debate_persona_prompt
+from app.roles.role_assignment import RoleAssignment, RoleAssigner, RoleScore
+from app.roles.role_templates import RoleType, RoleTemplate, find_best_among_templates, role_library
+from app.config import settings
 from app.state_machine.conversation_state import ConversationState, ConversationStateMachine, EventType
 
 
@@ -31,6 +33,12 @@ class ActiveConversation:
     # Per-unit user-message counter. Drives the auto-nudge to move on after
     # ~3 user turns on the same topic (see AUTO_NUDGE_AFTER_USER_TURNS).
     user_turns_by_unit: Dict[int, int] = None
+    # ``study_group`` = fixed pedagogical pool; ``perspective_debate`` = two LLM-authored viewpoints.
+    session_mode: str = "study_group"
+    # Selected RoleType order for study-group mode (``None`` = all five roles).
+    study_pool: Optional[List[RoleType]] = None
+    # Two `RoleTemplate` instances; only set for ``perspective_debate``.
+    debate_personas: Optional[List[RoleTemplate]] = None
 
     def __post_init__(self):
         if self.conversation_history is None:
@@ -39,6 +47,33 @@ class ActiveConversation:
             self.document_summary = {}
         if self.user_turns_by_unit is None:
             self.user_turns_by_unit = {}
+
+
+# --- Session mode + role pool parsing -------------------------------------------------
+
+SESSION_MODE_STUDY = "study_group"
+SESSION_MODE_DEBATE = "perspective_debate"
+
+_ROLE_VALUE_MAP: Dict[str, RoleType] = {rt.value: rt for rt in RoleType}
+
+
+def _parse_study_role_pool(study_role_count: int, role_names: List[str]) -> List[RoleType]:
+    if study_role_count not in (2, 5):
+        raise ValueError("study_role_count must be 2 or 5")
+    if not role_names or len(role_names) != study_role_count:
+        raise ValueError(f"Select exactly {study_role_count} roles for this session")
+    out: List[RoleType] = []
+    for raw in role_names:
+        key = (raw or "").strip()
+        role = _ROLE_VALUE_MAP.get(key)
+        if role is None:
+            raise ValueError(
+                f"Unknown role: {raw!r}. Use one of: {', '.join(_ROLE_VALUE_MAP)}"
+            )
+        out.append(role)
+    if len(set(out)) != len(out):
+        raise ValueError("Each role can only be selected once")
+    return out
 
 
 class ConversationRuntime:
@@ -59,7 +94,15 @@ class ConversationRuntime:
         self._llm_max_retries = 3
         logger.info("ConversationRuntime initialized")
 
-    def create_session_from_uploaded_file(self, upload: UploadFile) -> ActiveConversation:
+    def create_session_from_uploaded_file(
+        self,
+        upload: UploadFile,
+        *,
+        session_mode: str = SESSION_MODE_STUDY,
+        study_role_count: int = 5,
+        study_roles: Optional[List[str]] = None,
+        debate_hint: str = "",
+    ) -> ActiveConversation:
         """Create session from uploaded document and prepare role queue."""
         logger.info("")
         logger.info("=" * 80)
@@ -67,6 +110,14 @@ class ConversationRuntime:
         logger.info(f"   Filename: {upload.filename}")
         logger.info(f"   Size: {len(upload.file.read())} bytes")
         upload.file.seek(0)  # Reset file pointer
+        mode = (session_mode or SESSION_MODE_STUDY).strip().lower()
+        if mode in ("debate", "perspective", "perspective_debate", "pd"):
+            mode = SESSION_MODE_DEBATE
+        elif mode in ("study", "study_group", "sg"):
+            mode = SESSION_MODE_STUDY
+        if mode not in (SESSION_MODE_STUDY, SESSION_MODE_DEBATE):
+            raise ValueError("session_mode must be study_group or perspective_debate")
+        logger.info(f"   session_mode: {mode}")
         logger.info("=" * 80)
         
         extension = Path(upload.filename or "").suffix.lower()
@@ -79,7 +130,7 @@ class ConversationRuntime:
         temp_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            logger.info(f"📖 Reading and processing document...")
+            logger.info("📖 Reading and processing document...")
             contents = upload.file.read()
             temp_path.write_bytes(contents)
             logger.info(f"   Saved to: {temp_path}")
@@ -87,11 +138,10 @@ class ConversationRuntime:
             processor = self._get_processor()
             assigner = self._get_assigner()
 
-            logger.info(f"🔍 Segmenting into semantic units...")
+            logger.info("🔍 Segmenting into semantic units...")
             semantic_units = processor.process_document(str(temp_path))
             logger.info(f"✅ Created {len(semantic_units)} semantic units")
             
-            # Log each unit
             for idx, unit in enumerate(semantic_units, start=1):
                 preview = " ".join(unit.text.split())[:80]
                 logger.info(
@@ -101,26 +151,75 @@ class ConversationRuntime:
                 )
             
             document_summary = processor.get_document_summary(semantic_units)
-            logger.info(f"📊 DOCUMENT SUMMARY")
+            logger.info("📊 DOCUMENT SUMMARY")
             logger.info(f"   Total Units: {document_summary.get('total_units', 0)}")
             logger.info(f"   Total Words: {document_summary.get('total_words', 0)}")
             logger.info(f"   Avg Words/Unit: {document_summary.get('avg_words_per_unit', 0):.1f}")
             logger.info(f"   Avg Cohesion: {document_summary.get('avg_cohesion', 0):.3f}")
 
-            logger.info(f"🎭 ASSIGNING PEDAGOGICAL ROLES...")
-            assignments = assigner.assign_roles(semantic_units, balance_roles=True)
-            sorted_assignments = sorted(assignments, key=lambda a: a.semantic_unit.position)
-            logger.info(f"✅ Assigned roles to {len(sorted_assignments)} units")
-            
-            for idx, assignment in enumerate(sorted_assignments, start=1):
-                preview = " ".join(assignment.semantic_unit.text.split())[:80]
-                logger.info(
-                    f"   Unit {idx}: role={assignment.assigned_role.value}, "
-                    f"confidence={assignment.confidence:.3f}, "
-                    f"scores=[struct:{assignment.score.structural_score:.2f}, "
-                    f"lex:{assignment.score.lexical_score:.2f}, "
-                    f"topic:{assignment.score.topic_score:.2f}]"
+            study_pool: Optional[List[RoleType]] = None
+            debate_personas: Optional[List[RoleTemplate]] = None
+            sorted_assignments: List[RoleAssignment] = []
+
+            if mode == SESSION_MODE_DEBATE:
+                logger.info("🎭 PERSPECTIVE-DEBATE MODE: synthesizing two viewpoint personas...")
+                joined_excerpt = "\n\n".join(u.text for u in semantic_units[:12])
+                hint = (debate_hint or "").strip()
+                personas: List[RoleTemplate] = self._synthesize_debate_personas(
+                    document_excerpt=joined_excerpt, user_hint=hint
                 )
+                debate_personas = personas
+                dummy_score = RoleScore(
+                    role_type=RoleType.EXPLAINER,
+                    total_score=0.5,
+                    structural_score=0.5,
+                    lexical_score=0.5,
+                    topic_score=0.5,
+                )
+                primary_template = personas[0]
+                sorted_assignments = [
+                    RoleAssignment(
+                        semantic_unit=u,
+                        assigned_role=RoleType.EXPLAINER,
+                        role_template=primary_template,
+                        score=dummy_score,
+                        confidence=0.5,
+                        chime_in_roles=[RoleType.CHALLENGER],
+                    )
+                    for u in sorted(semantic_units, key=lambda x: x.position)
+                ]
+                logger.info(
+                    f"✅ Debate personas: {personas[0].name!r} vs {personas[1].name!r} "
+                    f"({len(sorted_assignments)} units)"
+                )
+            else:
+                names = study_roles
+                if not names:
+                    if study_role_count == 5:
+                        names = [rt.value for rt in RoleType]
+                    else:
+                        raise ValueError(
+                            "For a 2-role study session, pass study_roles with exactly two role names"
+                        )
+                study_pool = _parse_study_role_pool(study_role_count, names)
+                logger.info(
+                    f"🎭 ASSIGNING PEDAGOGICAL ROLES (pool {study_role_count}: "
+                    f"{[r.value for r in study_pool]})..."
+                )
+                assignments = assigner.assign_roles(
+                    semantic_units, balance_roles=True, allowed_roles=study_pool
+                )
+                sorted_assignments = sorted(assignments, key=lambda a: a.semantic_unit.position)
+                logger.info(f"✅ Assigned roles to {len(sorted_assignments)} units")
+                for idx, assignment in enumerate(sorted_assignments, start=1):
+                    preview = " ".join(assignment.semantic_unit.text.split())[:80]
+                    logger.info(
+                        f"   Unit {idx}: role={assignment.assigned_role.value}, "
+                        f"confidence={assignment.confidence:.3f}, "
+                        f"scores=[struct:{assignment.score.structural_score:.2f}, "
+                        f"lex:{assignment.score.lexical_score:.2f}, "
+                        f"topic:{assignment.score.topic_score:.2f}]"
+                    )
 
             sm = ConversationStateMachine(session_id=session_id)
             sm.transition(EventType.INITIALIZE)
@@ -128,7 +227,10 @@ class ConversationRuntime:
             sm.context.total_units = len(sorted_assignments)
             sm.transition(EventType.ROLES_ASSIGNED)
             if sorted_assignments:
-                sm.context.current_role = sorted_assignments[0].assigned_role.value
+                if mode == SESSION_MODE_DEBATE and debate_personas:
+                    sm.context.current_role = debate_personas[0].name
+                else:
+                    sm.context.current_role = sorted_assignments[0].assigned_role.value
             self._log_state(sm, "session_initialized")
 
             conversation = ActiveConversation(
@@ -138,16 +240,38 @@ class ConversationRuntime:
                 assignments_by_position=sorted_assignments,
                 state_machine=sm,
                 document_summary=document_summary,
+                session_mode=mode,
+                study_pool=study_pool,
+                debate_personas=debate_personas,
             )
             self._sessions[session_id] = conversation
             logger.info(
                 f"Created session {session_id} for {conversation.filename} "
-                f"with {len(sorted_assignments)} units"
+                f"with {len(sorted_assignments)} units (mode={mode})"
             )
             return conversation
         finally:
             if temp_path.exists():
                 temp_path.unlink()
+
+    def _synthesize_debate_personas(
+        self, document_excerpt: str, user_hint: str
+    ) -> List[RoleTemplate]:
+        """Ask the LLM for two debate personas; fall back deterministically on failure."""
+        client = self._get_llm_client()
+        if client is None:
+            return build_debate_personas_from_llm("", user_hint)
+        try:
+            prompt = render_debate_persona_prompt(document_excerpt, user_hint)
+            raw = client.generate(
+                prompt,
+                temperature=0.35,
+                max_tokens=min(2000, max(settings.llm_max_tokens, 1200)),
+            )
+            return build_debate_personas_from_llm(raw, user_hint)
+        except Exception as exc:
+            logger.warning(f"Debate persona synthesis failed ({exc}); using fallbacks")
+            return build_debate_personas_from_llm("", user_hint)
 
     def get_session(self, session_id: str) -> ActiveConversation:
         """Return existing in-memory session or raise KeyError."""
@@ -174,10 +298,13 @@ class ConversationRuntime:
             raise ValueError(f"Cannot start conversation from state {sm.context.current_state.value}")
 
         assignment = self._current_assignment(session)
-        speakers = assignment.speaker_order()[: self.OPENER_SPEAKERS]
+        if self._is_debate(session) and session.debate_personas:
+            speaker_line = ", ".join(p.name for p in session.debate_personas)
+        else:
+            spk = assignment.speaker_order()[: self.OPENER_SPEAKERS]
+            speaker_line = ", ".join(r.value for r in spk)
         logger.info(
-            f"🎤 OPENER on Unit 1 of {sm.context.total_units} "
-            f"(speakers: {', '.join(r.value for r in speakers)})"
+            f"🎤 OPENER on Unit 1 of {sm.context.total_units} (speakers: {speaker_line})"
         )
 
         start_gen = time.perf_counter()
@@ -187,7 +314,11 @@ class ConversationRuntime:
             f"✅ OPENER GENERATED ({len(messages)} messages, {gen_time}ms total)"
         )
 
-        last_role = messages[-1]["role"] if messages else assignment.assigned_role.value
+        last_role = messages[-1]["role"] if messages else (
+            session.debate_personas[0].name
+            if self._is_debate(session) and session.debate_personas
+            else assignment.assigned_role.value
+        )
         sm.context.current_role = last_role
         sm.transition(EventType.BOT_RESPONSE, {"type": "start"})
         sm.finish_bot_response()
@@ -245,7 +376,11 @@ class ConversationRuntime:
         if nudge is not None:
             messages.append(nudge)
 
-        last_role = messages[-1]["role"] if messages else assignment.assigned_role.value
+        last_role = messages[-1]["role"] if messages else (
+            session.debate_personas[0].name
+            if self._is_debate(session) and session.debate_personas
+            else assignment.assigned_role.value
+        )
         sm.context.current_role = last_role
         sm.transition(EventType.BOT_RESPONSE, {"type": "user_message"})
         sm.finish_bot_response()
@@ -287,9 +422,22 @@ class ConversationRuntime:
             raise ValueError(result["error"])
 
         current_assignment = self._current_assignment(session)
-        override_template = role_library.find_best_role_for_keywords(message)
+        override_template = None
+        if self._is_debate(session) and session.debate_personas:
+            override_template = find_best_among_templates(
+                session.debate_personas, message, fallback=session.debate_personas[0]
+            )
+        else:
+            override_template = role_library.find_best_role_for_keywords(message)
+            pooled = session.study_pool
+            if (
+                override_template is not None
+                and pooled is not None
+                and override_template.role_type not in pooled
+            ):
+                override_template = None
         template = override_template or current_assignment.role_template
-        template_name = template.role_type.value if hasattr(template, 'role_type') else template.name
+        template_name = template.name
         logger.info(
             f"Interruption response role selected: {template_name} "
             f"(override={'yes' if override_template else 'no'})"
@@ -302,12 +450,10 @@ class ConversationRuntime:
             user_input=message,
             session=session,
         )
-        sm.context.current_role = (
-            template.role_type.value if hasattr(template, 'role_type') else template.name
-        )
+        sm.context.current_role = template.name
         sm.transition(EventType.BOT_RESPONSE, {"type": "interruption"})
         sm.finish_bot_response()
-        role_name = template.role_type.value if hasattr(template, 'role_type') else template.name
+        role_name = template.name
         self._record_exchange(session, message, role_name, response)
         self._log_state(sm, "after_interruption_answer")
 
@@ -413,14 +559,21 @@ class ConversationRuntime:
         assignment = self._current_assignment(session)
         # Fresh topic — reset any stale nudge counter for this unit.
         session.user_turns_by_unit.pop(assignment.semantic_unit.position, None)
+        if self._is_debate(session) and session.debate_personas:
+            spk = [p.name for p in session.debate_personas]
+        else:
+            spk = [r.value for r in assignment.speaker_order()[: self.OPENER_SPEAKERS]]
         logger.info(
             f"Advanced to unit={assignment.semantic_unit.id} "
-            f"(index={sm.context.current_unit_index}) with speakers="
-            f"{[r.value for r in assignment.speaker_order()[:self.OPENER_SPEAKERS]]}"
+            f"(index={sm.context.current_unit_index}) with speakers={spk}"
         )
         sm.start_bot_response()
         messages = self._generate_group_opener(session, assignment)
-        last_role = messages[-1]["role"] if messages else assignment.assigned_role.value
+        last_role = messages[-1]["role"] if messages else (
+            session.debate_personas[0].name
+            if self._is_debate(session) and session.debate_personas
+            else assignment.assigned_role.value
+        )
         sm.context.current_role = last_role
         sm.transition(EventType.BOT_RESPONSE, {"type": "next_unit"})
         sm.finish_bot_response()
@@ -439,12 +592,21 @@ class ConversationRuntime:
         current_role = sm.context.current_role
         self._log_state(sm, "get_session_state")
 
+        study_sel = [r.value for r in session.study_pool] if session.study_pool else None
+        debate = (
+            [{"name": p.name} for p in session.debate_personas]
+            if session.debate_personas
+            else None
+        )
         return {
             "session_id": session_id,
             "filename": session.filename,
             "total_units": sm.context.total_units,
             "current_unit_index": sm.context.current_unit_index,
             "current_role": current_role,
+            "session_mode": session.session_mode,
+            "selected_roles": study_sel,
+            "debate_personas": debate,
             "state": sm.get_state_summary(),
         }
 
@@ -517,6 +679,10 @@ class ConversationRuntime:
     # Group conversation generators
     # ──────────────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _is_debate(session: ActiveConversation) -> bool:
+        return session.session_mode == SESSION_MODE_DEBATE and bool(session.debate_personas)
+
     def _generate_group_opener(
         self,
         session: ActiveConversation,
@@ -528,6 +694,9 @@ class ConversationRuntime:
         ``{"role": <RoleType.value>, "text": <str>}``. The first speaker is
         the unit's primary role; the rest are the pre-computed chime-ins.
         """
+        if self._is_debate(session) and session.debate_personas:
+            return self._generate_debate_group_opener(session, assignment)
+
         speakers = assignment.speaker_order()[: self.OPENER_SPEAKERS]
         other_names_full = [role_library.get_role(r).name for r in speakers]
         messages: List[Dict[str, str]] = []
@@ -558,6 +727,81 @@ class ConversationRuntime:
 
         return messages
 
+    def _generate_debate_group_opener(
+        self,
+        session: ActiveConversation,
+        assignment: RoleAssignment,
+    ) -> List[Dict[str, str]]:
+        """Two-voice topic opener for perspective-debate mode."""
+        personas = session.debate_personas or []
+        if len(personas) < 2:
+            return []
+        other_names_full = [p.name for p in personas]
+        messages: List[Dict[str, str]] = []
+        last_idx = len(personas) - 1
+        for idx, template in enumerate(personas):
+            other_names = [n for n in other_names_full if n != template.name]
+            if idx == 0:
+                style = "open"
+            elif idx == last_idx:
+                style = "chime_closer"
+            else:
+                style = "chime"
+            text = self._generate_response_with_style(
+                template,
+                assignment.semantic_unit.text,
+                session=session,
+                reply_style=style,
+                group_transcript=list(messages),
+                other_role_names=other_names,
+            )
+            messages.append({"role": template.name, "text": text})
+            self._record_exchange(session, None, template.name, text)
+        return messages
+
+    def _generate_debate_group_reply(
+        self,
+        session: ActiveConversation,
+        assignment: RoleAssignment,
+        user_message: str,
+    ) -> List[Dict[str, str]]:
+        """Two-voice reply: best keyword match, then the other debater chimes in."""
+        personas = session.debate_personas or []
+        if len(personas) < 2:
+            return []
+        primary_template = find_best_among_templates(
+            personas, user_message, fallback=personas[0]
+        )
+        chime_template = next(
+            (p for p in personas if p.name != primary_template.name), personas[1]
+        )
+        other_names_for_primary = [p.name for p in personas if p.name != primary_template.name]
+        messages: List[Dict[str, str]] = []
+        primary_text = self._generate_response_with_style(
+            primary_template,
+            assignment.semantic_unit.text,
+            user_input=user_message,
+            session=session,
+            reply_style="reply",
+            other_role_names=other_names_for_primary,
+        )
+        messages.append({"role": primary_template.name, "text": primary_text})
+        self._record_exchange(session, user_message, primary_template.name, primary_text)
+        if self.REPLY_CHIME_IN:
+            other_names_for_chime = [p.name for p in personas if p.name != chime_template.name]
+            chime_text = self._generate_response_with_style(
+                chime_template,
+                assignment.semantic_unit.text,
+                user_input=user_message,
+                session=session,
+                reply_style="reply_chime",
+                group_transcript=list(messages),
+                other_role_names=other_names_for_chime,
+            )
+            messages.append({"role": chime_template.name, "text": chime_text})
+            self._record_exchange(session, None, chime_template.name, chime_text)
+        return messages
+
     def _generate_group_reply(
         self,
         session: ActiveConversation,
@@ -565,12 +809,22 @@ class ConversationRuntime:
         user_message: str,
     ) -> List[Dict[str, str]]:
         """Produce a primary reply + (optional) chime-in to the student."""
+        if self._is_debate(session) and session.debate_personas:
+            return self._generate_debate_group_reply(session, assignment, user_message)
+
         speakers = assignment.speaker_order()
         if not speakers:
             return []
 
         # Pick primary replier: keyword-route first, fall back to unit owner.
         routed = role_library.find_best_role_for_keywords(user_message)
+        pooled = session.study_pool
+        if (
+            routed is not None
+            and pooled is not None
+            and routed.role_type not in pooled
+        ):
+            routed = None
         primary_role = (
             routed.role_type
             if routed is not None and routed.role_type in speakers
@@ -638,7 +892,10 @@ class ConversationRuntime:
             return None
         # Only nudge ONCE per unit — bump the counter past threshold.
         session.user_turns_by_unit[unit_idx] = turns + 1000
-        template = role_library.get_role(assignment.assigned_role)
+        if self._is_debate(session) and session.debate_personas:
+            template = session.debate_personas[0]
+        else:
+            template = role_library.get_role(assignment.assigned_role)
         text = self._generate_response_with_style(
             template,
             assignment.semantic_unit.text,
@@ -734,19 +991,29 @@ class ConversationRuntime:
         user_input: Optional[str] = None,
         session: Optional[ActiveConversation] = None,
     ) -> str:
-        """Backwards-compatible single-turn generator used by interruption and resume paths.
+        """Single-turn generator used by interruption and resume paths.
 
-        These paths are kept single-role because (a) interruptions are the user's
-        targeted follow-up question — a single focused answer reads better than a
-        group exchange, and (b) resume is a brief "back to it" re-entry.
+        For debate sessions we pass the other persona name as other_role_names so
+        the hallucination-cut regex catches it.
         """
+        other_role_names: Optional[List[str]] = None
+        if session is not None and self._is_debate(session) and session.debate_personas:
+            other_role_names = [
+                p.name for p in session.debate_personas if p.name != template.name
+            ]
         return self._generate_response_with_style(
-            template, context, user_input=user_input, session=session, reply_style="auto"
+            template,
+            context,
+            user_input=user_input,
+            session=session,
+            reply_style="auto",
+            other_role_names=other_role_names,
         )
 
     # Roles the LLM might hallucinate a turn for after its own. We cut the
     # response at the first such marker to kill the "writes both sides of the
     # dialogue" problem that small models exhibit.
+    # Debate persona names are added dynamically per-session in _postprocess_response.
     _HALLUCINATED_SPEAKERS = (
         "Student",
         "User",
@@ -850,20 +1117,21 @@ class ConversationRuntime:
         context: str,
         user_input: Optional[str] = None,
     ) -> str:
-        """Rich deterministic fallback that generates role-appropriate educational content."""
-        # Extract meaningful paragraphs from context
+        """Deterministic fallback used when the LLM is unavailable."""
         paragraphs = [p.strip() for p in context.split("\n\n") if len(p.strip()) > 40]
         if not paragraphs:
             paragraphs = [s.strip() for s in context.split("\n") if len(s.strip()) > 30]
-        # Extract key sentences (first sentence of each paragraph)
         key_sentences = []
         for p in paragraphs[:5]:
             dot = p.find(".")
             if dot > 15:
                 key_sentences.append(p[: dot + 1])
 
-        role = template.name
+        # Debate personas: route to the debate fallback
+        if template.is_debate:
+            return self._fallback_debate(template, context, paragraphs, key_sentences, user_input)
 
+        role = template.name
         if role == "Explainer":
             return self._fallback_explainer(context, paragraphs, key_sentences, user_input)
         elif role == "Challenger":
@@ -874,11 +1142,49 @@ class ConversationRuntime:
             return self._fallback_example_gen(context, paragraphs, key_sentences, user_input)
         elif role == "Misconception-Spotter":
             return self._fallback_misconception(context, paragraphs, key_sentences, user_input)
-        # Generic fallback
         preview = paragraphs[0][:400] if paragraphs else context[:400]
-        return f"Let's explore this section:\n\n{preview}\n\nFeel free to ask questions about any part of this material."
+        return f"Let's explore this section: {preview} Feel free to ask about any part of this."
 
-    # ── Role-specific fallback generators ──────────────────────────
+    # ── Role-specific fallback generators ──────────────────────────────────────
+
+    def _fallback_debate(self, template: RoleTemplate, context, paragraphs, key_sentences, user_input) -> str:
+        """Persona-aware fallback for debate mode (used when LLM is offline)."""
+        meta = template.metadata or {}
+        viewpoint = meta.get("viewpoint_label") or template.name
+        debate_index = meta.get("debate_index", 0)
+        topic = key_sentences[0] if key_sentences else (paragraphs[0][:200] if paragraphs else context[:200])
+
+        if user_input:
+            if debate_index == 0:
+                resp = (
+                    f"From my standpoint as {template.name} — {viewpoint} — "
+                    f"your question touches on something important. {topic} "
+                    "The material supports this reading when you consider the context and actors described. "
+                    "What aspect of my interpretation do you find most or least convincing?"
+                )
+            else:
+                resp = (
+                    f"I'd push back on that from my position as {template.name}. {topic} "
+                    "The same passage can be read very differently depending on whose interests you centre. "
+                    "Does the text give you enough evidence to favour one interpretation over the other?"
+                )
+        else:
+            if debate_index == 0:
+                resp = (
+                    f"As {template.name} — representing {viewpoint} — I read this section as follows. "
+                    f"{topic} "
+                    "The evidence here, taken at face value, strongly supports the position I represent. "
+                    "I welcome the other perspective, but I think the text is clear on this point."
+                )
+            else:
+                resp = (
+                    f"From where I stand as {template.name} — {viewpoint} — this section "
+                    "tells a very different story. "
+                    f"{topic} "
+                    "The framing my counterpart offers ignores critical tensions in the material. "
+                    "Which reading do you think the evidence better supports?"
+                )
+        return resp
 
     def _fallback_explainer(self, context, paragraphs, key_sentences, user_input):
         intro = key_sentences[0] if key_sentences else paragraphs[0][:200] if paragraphs else context[:200]

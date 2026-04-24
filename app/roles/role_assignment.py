@@ -345,6 +345,24 @@ class RoleScorer:
         return min(score, 1.0)
 
 
+_BASE_TARGET_RATIOS: Dict[RoleType, float] = {
+    RoleType.EXPLAINER: 0.30,
+    RoleType.CHALLENGER: 0.20,
+    RoleType.SUMMARIZER: 0.15,
+    RoleType.EXAMPLE_GENERATOR: 0.20,
+    RoleType.MISCONCEPTION_SPOTTER: 0.15,
+}
+
+
+def _ratios_for_allowed(allowed: List[RoleType]) -> Dict[RoleType, float]:
+    """Normalize base ratios to sum to 1.0 over the allowed role pool only."""
+    s = sum(_BASE_TARGET_RATIOS.get(r, 0.0) for r in allowed)
+    if s <= 0:
+        n = max(len(allowed), 1)
+        return {r: 1.0 / n for r in allowed}
+    return {r: _BASE_TARGET_RATIOS.get(r, 0.0) / s for r in allowed}
+
+
 class RoleAssigner:
     """
     Assigns roles to semantic units using deterministic scoring.
@@ -359,7 +377,8 @@ class RoleAssigner:
     def assign_roles(
         self,
         semantic_units: List[SemanticUnit],
-        balance_roles: bool = True
+        balance_roles: bool = True,
+        allowed_roles: Optional[List[RoleType]] = None,
     ) -> List[RoleAssignment]:
         """
         Assign roles to all semantic units.
@@ -367,6 +386,10 @@ class RoleAssigner:
         Args:
             semantic_units: List of semantic units from document
             balance_roles: If True, balance role distribution across document
+            allowed_roles: If set, only these RoleType values are considered for
+                primary assignment and chime-ins (e.g. a 2-role or 5-role pool).
+                Order matters for the first unit: Explainer is preferred when present,
+                otherwise the first entry is used to open the document.
             
         Returns:
             List of role assignments
@@ -376,22 +399,32 @@ class RoleAssigner:
         
         assignments = []
         total_units = len(semantic_units)
+        allowed = list(allowed_roles) if allowed_roles else list(RoleType)
+        allowed_set = set(allowed)
+        if not allowed:
+            raise ValueError("allowed_roles must contain at least one role")
+        for r in allowed:
+            if r not in RoleType:
+                raise ValueError(f"Invalid role: {r}")
+        target_ratios = _ratios_for_allowed(allowed)
         
-        # Score each unit for each role
+        # Score each unit for each role in the active pool only
         all_scores: Dict[str, Dict[RoleType, RoleScore]] = {}
         
         for unit in semantic_units:
             unit_scores = {}
-            for role_type in RoleType:
+            for role_type in allowed:
                 score = self.scorer.score_unit_for_role(unit, role_type, total_units)
                 unit_scores[role_type] = score
             all_scores[unit.id] = unit_scores
         
         # Assign roles based on scores
         if balance_roles:
-            assignments = self._assign_with_balancing(semantic_units, all_scores)
+            assignments = self._assign_with_balancing(
+                semantic_units, all_scores, allowed, target_ratios
+            )
         else:
-            assignments = self._assign_greedy(semantic_units, all_scores)
+            assignments = self._assign_greedy(semantic_units, all_scores, allowed)
         
         logger.info(f"Assigned roles to {len(assignments)} semantic units")
         return assignments
@@ -417,7 +450,8 @@ class RoleAssigner:
     def _assign_greedy(
         self,
         semantic_units: List[SemanticUnit],
-        all_scores: Dict[str, Dict[RoleType, RoleScore]]
+        all_scores: Dict[str, Dict[RoleType, RoleScore]],
+        allowed: List[RoleType],
     ) -> List[RoleAssignment]:
         """
         Greedy assignment: assign best-scoring role to each unit.
@@ -427,6 +461,7 @@ class RoleAssigner:
         """
         assignments = []
 
+        chime_cap = min(2, max(0, len(allowed) - 1))
         for unit in semantic_units:
             unit_scores = all_scores[unit.id]
             best_role = max(unit_scores.keys(), key=lambda r: unit_scores[r].total_score)
@@ -439,7 +474,9 @@ class RoleAssigner:
                 role_template=template,
                 score=best_score,
                 confidence=best_score.total_score,
-                chime_in_roles=self._pick_chime_ins(unit_scores, best_role, count=2),
+                chime_in_roles=self._pick_chime_ins(
+                    unit_scores, best_role, count=chime_cap
+                ),
             )
             assignments.append(assignment)
 
@@ -448,7 +485,9 @@ class RoleAssigner:
     def _assign_with_balancing(
         self,
         semantic_units: List[SemanticUnit],
-        all_scores: Dict[str, Dict[RoleType, RoleScore]]
+        all_scores: Dict[str, Dict[RoleType, RoleScore]],
+        allowed: List[RoleType],
+        target_ratios: Dict[RoleType, float],
     ) -> List[RoleAssignment]:
         """
         Balanced assignment: ensure reasonable distribution of roles.
@@ -462,39 +501,40 @@ class RoleAssigner:
         """
         assignments = []
         total_units = len(semantic_units)
+        chime_cap = min(2, max(0, len(allowed) - 1))
         
-        # Target distribution (can be adjusted)
-        target_ratios = {
-            RoleType.EXPLAINER: 0.30,
-            RoleType.CHALLENGER: 0.20,
-            RoleType.SUMMARIZER: 0.15,
-            RoleType.EXAMPLE_GENERATOR: 0.20,
-            RoleType.MISCONCEPTION_SPOTTER: 0.15
-        }
-        
-        # Track role counts and assigned units
-        role_counts = {role: 0 for role in RoleType}
+        # Track role counts and assigned units (pool-restricted)
+        role_counts = {role: 0 for role in allowed}
         assigned_unit_ids = set()
         
-        # PEDAGOGICAL CONSTRAINT: Force first unit (position 0) to Explainer
+        # First unit opens the document: prefer Explainer when it is in the selected pool;
+        # otherwise the first role in the user's selection order.
+        first_open_role = (
+            RoleType.EXPLAINER
+            if RoleType.EXPLAINER in allowed
+            else allowed[0]
+        )
         first_unit = next((u for u in semantic_units if u.position == 0), None)
         if first_unit:
-            template = role_library.get_role(RoleType.EXPLAINER)
-            score = all_scores[first_unit.id][RoleType.EXPLAINER]
+            template = role_library.get_role(first_open_role)
+            score = all_scores[first_unit.id][first_open_role]
             assignment = RoleAssignment(
                 semantic_unit=first_unit,
-                assigned_role=RoleType.EXPLAINER,
+                assigned_role=first_open_role,
                 role_template=template,
                 score=score,
                 confidence=score.total_score,
                 chime_in_roles=self._pick_chime_ins(
-                    all_scores[first_unit.id], RoleType.EXPLAINER, count=2
+                    all_scores[first_unit.id], first_open_role, count=chime_cap
                 ),
             )
             assignments.append(assignment)
-            role_counts[RoleType.EXPLAINER] += 1
+            role_counts[first_open_role] += 1
             assigned_unit_ids.add(first_unit.id)
-            logger.info("First unit (position 0) assigned to Explainer (pedagogical constraint)")
+            logger.info(
+                f"First unit (position 0) assigned to {first_open_role.value} "
+                f"(pool={[r.value for r in allowed]})"
+            )
         
         # Create list of (unit, best_role, score) tuples for remaining units
         unit_preferences = []
@@ -545,7 +585,7 @@ class RoleAssigner:
                 score=final_score,
                 confidence=final_score.total_score,
                 chime_in_roles=self._pick_chime_ins(
-                    all_scores[unit.id], assigned_role, count=2
+                    all_scores[unit.id], assigned_role, count=chime_cap
                 ),
             )
             assignments.append(assignment)

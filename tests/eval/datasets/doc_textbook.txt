@@ -1,0 +1,98 @@
+INTRODUCTION TO BINARY SEARCH TREES
+
+A binary search tree is a hierarchical data structure that organises values
+in a way that supports fast lookup, insertion and deletion. Each node holds
+a key, a left child reference and a right child reference. The defining
+property is that for every node, all keys in its left subtree are smaller
+than the node's key and all keys in its right subtree are larger. Duplicate
+keys are typically disallowed unless the tree is augmented with counts.
+
+The structural invariant is what gives the binary search tree its useful
+asymptotic behaviour. When the tree is balanced, the height stays close to
+log n, where n is the number of nodes, and the three core operations run
+in O(log n) time. When the tree is unbalanced, the height can degrade to n
+and the operations become linear, which defeats the purpose. Self-balancing
+variants such as AVL trees and red-black trees address this problem by
+performing rotations on insert and delete to keep the height bounded.
+
+CORE OPERATIONS
+
+The search operation walks down the tree starting from the root. At each
+node, the target key is compared against the node's key. If they match, the
+search terminates with success. If the target is smaller, the search
+continues into the left subtree. If the target is larger, it continues into
+the right subtree. The search terminates with failure when a null reference
+is reached. The number of comparisons is bounded by the height of the tree.
+
+Insertion follows the same comparison rules until a null reference is found,
+and then a new node is attached at that position. Insertion preserves the
+binary search property because the new key was compared against every node
+on the path and consistently moved to the correct side. The shape of the
+tree, however, depends on the order in which keys are inserted. Sorted input
+produces a degenerate tree that looks like a linked list.
+
+Deletion is the most intricate of the three operations because the node to
+be removed may have zero, one, or two children. If the node is a leaf, it
+is simply detached. If the node has one child, the child takes its place.
+If the node has two children, the standard approach is to find the
+in-order successor, which is the smallest node in the right subtree, copy
+its key into the node being deleted, and then delete the successor. The
+in-order successor itself has at most one child, so the recursive case
+always reduces to a simpler one.
+
+TRAVERSALS
+
+A binary search tree can be traversed in three standard ways. In-order
+traversal visits the left subtree, then the node, then the right subtree,
+producing keys in sorted order. Pre-order traversal visits the node first,
+then the left subtree, then the right subtree, which is convenient for
+copying or serialising the tree. Post-order traversal visits both subtrees
+before the node, which is the natural order for releasing memory.
+
+All three traversals run in O(n) time and O(h) auxiliary space, where h is
+the height of the tree. Iterative implementations using an explicit stack
+are common when the recursion depth would otherwise blow the call stack on
+deeply unbalanced trees. Morris traversal threads the tree to achieve O(1)
+auxiliary space at the cost of temporarily mutating right child pointers.
+
+BALANCING STRATEGIES
+
+The cost of an unbalanced tree is high enough that production data
+structures rarely use a plain binary search tree. AVL trees keep the
+heights of the left and right subtrees within one of each other and
+restore the invariant with single or double rotations on insert and delete.
+Red-black trees relax the height balance slightly in exchange for fewer
+rotations on average, which makes them attractive for ordered map
+implementations such as the standard library map in C++ and TreeMap in Java.
+
+Splay trees take a different approach. They do not maintain an explicit
+balance invariant. Instead, every accessed node is moved to the root by a
+sequence of rotations. The amortised cost of any sequence of operations
+remains O(log n) per operation, but individual operations may be much more
+expensive. Splay trees are therefore well suited to workloads with
+non-uniform access patterns, where recently accessed keys are likely to be
+accessed again.
+
+COMMON PITFALLS
+
+Beginners often confuse the binary search tree property with the heap
+property. A heap only constrains the relationship between a parent and its
+children, not the entire subtree, so a heap does not support efficient
+ordered traversal. Another common mistake is to assume that any sequence of
+inserts produces a balanced tree. The shape of the tree is entirely
+determined by the input order in the unbalanced case.
+
+Memory layout is also frequently overlooked. A pointer-based binary search
+tree has poor cache locality compared to a sorted array or a B-tree, which
+matters in practice for large data sets. When in doubt, profile before
+choosing a data structure.
+
+CONCLUSION
+
+The binary search tree is the canonical introduction to ordered associative
+data structures. Its core operations are simple to state and easy to
+implement. The asymptotic guarantees only hold when the tree is balanced,
+which is why every serious implementation is a self-balancing variant. The
+three traversal orders, the deletion-by-successor trick and the awareness
+of cache effects together cover most of what a working programmer needs to
+know about binary search trees in practice.

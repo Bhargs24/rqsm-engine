@@ -1,0 +1,109 @@
+STUDY GUIDE: TCP CONGESTION CONTROL
+
+OVERVIEW
+
+This guide covers the core mechanisms used by TCP to share network
+bandwidth fairly between competing flows. By the end of this guide you
+should be able to explain slow start, congestion avoidance, fast
+retransmit and fast recovery in your own words, and you should be able to
+recognise the typical sawtooth pattern in a TCP throughput plot.
+
+KEY CONCEPTS
+
+The fundamental problem TCP solves is that the sender does not know the
+capacity of the path between itself and the receiver. The sender therefore
+has to discover the capacity by probing. The probing is conservative on
+the way up and aggressive on the way down. This is the asymmetry that
+gives TCP its characteristic behaviour. Two state variables drive the
+mechanism. The congestion window cwnd bounds the number of unacknowledged
+bytes in flight from the sender. The slow start threshold ssthresh marks
+the boundary between exponential and linear growth.
+
+SLOW START
+
+Slow start runs at the beginning of a connection and after a timeout
+indicates that the network state has been lost. The sender begins with a
+small congestion window, typically ten segments in modern stacks. Every
+time an acknowledgment arrives, the congestion window grows by one
+segment, which means the window doubles every round trip time. This is
+exponential growth in disguise. The phase ends either when an
+acknowledgment is missed or when the congestion window crosses the slow
+start threshold.
+
+CONGESTION AVOIDANCE
+
+Congestion avoidance is the linear growth phase. Once the congestion
+window has crossed the slow start threshold, every round trip time it
+grows by one segment instead of doubling. This is the additive increase
+side of the additive increase multiplicative decrease pattern. The
+network is now at or near capacity and growing aggressively would push
+all flows into loss simultaneously, which is exactly what TCP wants to
+avoid.
+
+FAST RETRANSMIT AND FAST RECOVERY
+
+A timeout is an expensive way to detect packet loss because it stalls
+the connection for at least one timeout period. Fast retransmit shortcuts
+this by interpreting three duplicate acknowledgments as a strong signal
+that a single segment was lost. The sender retransmits the missing
+segment immediately without waiting for the timeout. Fast recovery then
+takes over. Instead of resetting the congestion window all the way down
+to the initial value, fast recovery sets the slow start threshold to
+half the current congestion window, sets the congestion window to the
+new threshold and resumes congestion avoidance directly. This avoids the
+costly slow start phase when a single segment is lost.
+
+COMMON MISCONCEPTIONS
+
+A common misconception is that TCP throughput is limited by the bandwidth
+of the bottleneck link. The actual ceiling is the product of the round
+trip time and the maximum congestion window allowed by the receiver and
+by the sender. On a high bandwidth long delay path the bandwidth-delay
+product can be tens of megabytes, which is far larger than the default
+window size on many systems.
+
+Another misconception is that any packet loss indicates congestion. On
+wireless links and on lossy intermediate paths, packets may be lost
+because of bit errors rather than congestion. Standard TCP cannot
+distinguish between these two causes and reduces the congestion window
+in both cases. This is part of why specialised congestion control
+algorithms exist for wireless and high speed environments.
+
+WORKED EXAMPLES
+
+Consider a connection with a one hundred millisecond round trip time and
+a one megabyte per second bottleneck link. The bandwidth-delay product is
+one hundred kilobytes. The sender therefore needs to keep at least one
+hundred kilobytes in flight to fully utilise the link. With a maximum
+segment size of one and a half kilobytes, this is approximately seventy
+segments. If the congestion window is held below seventy segments, the
+sender cannot fill the pipe regardless of the available bandwidth.
+
+As a second example, consider a connection that experiences a single
+segment loss after the congestion window has grown to forty segments.
+Fast retransmit triggers on the third duplicate acknowledgment. The slow
+start threshold drops to twenty segments. The congestion window also
+drops to twenty segments. Congestion avoidance resumes from twenty.
+Without fast recovery, the connection would have entered slow start from
+ten segments and lost roughly two round trip times of throughput.
+
+REVIEW QUESTIONS
+
+Try to answer these in your own words before moving on. What is the
+difference between the slow start phase and the congestion avoidance
+phase, and what triggers the transition between them? Why does fast
+recovery skip slow start after a single segment loss? Under what
+circumstances does TCP misinterpret packet loss as congestion, and what
+are the consequences for throughput?
+
+SUMMARY
+
+TCP congestion control is built around two state variables, cwnd and
+ssthresh, and four mechanisms, slow start, congestion avoidance, fast
+retransmit and fast recovery. The mechanisms together implement an
+additive increase multiplicative decrease policy that probes the network
+capacity conservatively on the way up and reduces aggressively on the
+way down. The result is the familiar sawtooth pattern in steady state
+throughput plots. Most modern variants tweak the constants and the
+recovery rules but preserve the additive increase multiplicative decrease
+shape.

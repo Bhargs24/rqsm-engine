@@ -1,0 +1,104 @@
+A LIGHTWEIGHT APPROACH TO DETERMINISTIC ROLE ORCHESTRATION IN CONVERSATIONAL LEARNING SYSTEMS
+
+ABSTRACT
+
+This paper presents an approach for orchestrating multi-role conversational
+learning agents in a deterministic, auditable manner. We argue that the
+non-deterministic behaviour of single-agent large language model tutors is
+incompatible with the reproducibility requirements of formal educational
+deployment. We propose a role queue state machine that fixes the role
+sequence per semantic unit using a rule-based scoring function and gates
+intent-driven reallocation behind explicit confidence and stability
+thresholds. The result is a tutoring loop whose every transition is
+inspectable from a persisted audit log. A reference implementation
+demonstrates that the orchestration overhead is bounded and that identical
+inputs produce identical role queues across repeated runs.
+
+INTRODUCTION
+
+Conversational tutoring systems built on large language models exhibit two
+desirable properties. They produce fluent natural language and they adapt
+their phrasing to the context of the conversation. They also exhibit a
+property that is undesirable in an educational setting, which is that two
+runs of the same input do not generally produce the same output. This is
+the consequence of stochastic decoding, asynchronous tool use and provider
+side load balancing across server replicas.
+
+Reproducibility matters in education because the choice of teaching strategy
+is often the object of study. If a study reports that a student improved
+under a particular sequence of pedagogical roles, the only way to verify
+the claim is to replay the exact session against the same system and check
+that the role sequence is the same. This is impossible if the role sequence
+is itself stochastic.
+
+RELATED WORK
+
+Earlier dialogue tutoring systems such as AutoTutor were built on
+hand-authored finite state machines and produced reproducible role
+sequences by construction. The limitation was that the role sequence was
+fixed per script and could not adapt to new content without rewriting the
+script. Recent multi-agent systems built on large language models can adapt
+to new content but lose the reproducibility property. Reinforcement
+learning based dialogue managers exist in between but are notoriously
+difficult to audit because the policy is encoded in network weights rather
+than in inspectable rules.
+
+METHODS
+
+We frame the orchestration problem as the assignment of an ordered role
+sequence to each semantic unit of an input document. The role assignment
+is the output of a deterministic scoring function with three components.
+A structural component scores the unit based on its position, section type
+and length. A lexical component scores the unit based on the presence of
+role-indicative keywords. A topic component scores the unit based on the
+cosine similarity between a fixed embedding of the unit and a fixed
+reference embedding of the role. The three components are combined with
+fixed weights, summed and broken on alphabetical role identifier.
+
+The role queue state machine consumes the resulting role queues and
+executes them turn by turn. Transitions between roles are gated by a
+minimum delay and by a hysteresis window that limits the number of
+reallocations within a moving window of recent turns. User interruptions
+are classified by a two-stage intent classifier. The first stage matches
+keywords against a small set of regular expressions. The second stage
+computes the cosine similarity between the user input embedding and a set
+of reference embeddings for each intent class. The two scores are combined
+with fixed weights and the resulting confidence must clear a threshold
+before any reallocation is applied.
+
+REPRODUCIBILITY ANALYSIS
+
+Determinism is not an emergent property of the system. It was an explicit
+design constraint, and every component was written so that identical
+inputs always produce identical outputs. Tie breaking uses fixed
+alphabetical order over role identifiers. Embedding computations use
+pinned model versions and fixed random seeds. The scoring function uses
+fixed weights and contains no calls to random number generators. The state
+machine transition table is static. The intent classifier reference
+embeddings are computed once at startup and cached.
+
+We verified determinism empirically by running the full pipeline on three
+documents repeatedly and comparing the resulting semantic unit lists, role
+queues, initial state machine context and audit log. All replays were
+byte-identical for all three documents.
+
+LIMITATIONS
+
+The approach has two important limitations. The first is that the
+scoring weights and the reference embeddings were tuned by hand against a
+small corpus of educational documents and have not been validated against
+a held-out set of natural learner input. The second is that the determinism
+property only holds at the orchestration layer. The text generation step
+is delegated to an external large language model and is therefore subject
+to whatever non-determinism the chosen provider exhibits. We address the
+second limitation by recommending fixed temperature, fixed sampling
+parameters and a pinned model version when the deployment context allows.
+
+CONCLUSION
+
+The deterministic orchestration of multi-role conversational tutoring is
+feasible without sacrificing the adaptive properties of large language
+model dialogue systems. Confining stochasticity to the leaf-level text
+generation step and keeping the orchestration layer rule-based is a useful
+design pattern for educational deployments where reproducibility and
+auditability are required.

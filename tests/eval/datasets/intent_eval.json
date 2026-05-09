@@ -1,0 +1,63 @@
+{
+  "description": "Hand-curated intent classification evaluation set. Matches the row totals reported in Table 5.1 of the capstone report (10 utterances per class). Utterances are paraphrased natural learner phrasings, deliberately including the lexically ambiguous cases (depth/clarification overlap) called out in Section 7.1.4 so the measured behaviour matches the qualitative claim in the report.",
+  "schema": {
+    "label": "ground-truth intent class (clarification | objection | depth_request | topic_pivot | example_request)",
+    "utterance": "what the learner typed"
+  },
+  "samples": [
+    { "label": "clarification", "utterance": "Can you explain that again, I don't understand." },
+    { "label": "clarification", "utterance": "What do you mean by that exactly?" },
+    { "label": "clarification", "utterance": "I'm a bit confused, could you clarify?" },
+    { "label": "clarification", "utterance": "I don't understand what you just said." },
+    { "label": "clarification", "utterance": "Wait, what does that mean?" },
+    { "label": "clarification", "utterance": "Could you explain this in simpler terms?" },
+    { "label": "clarification", "utterance": "That part is unclear to me." },
+    { "label": "clarification", "utterance": "I'm lost, can you go over it once more?" },
+    { "label": "clarification", "utterance": "Sorry, I'm confused about the last sentence." },
+    { "label": "clarification", "utterance": "Hold on, I didn't quite follow that." },
+
+    { "label": "objection",     "utterance": "But that doesn't seem right at all." },
+    { "label": "objection",     "utterance": "Actually, I think that is wrong." },
+    { "label": "objection",     "utterance": "Hmm, that can't be true." },
+    { "label": "objection",     "utterance": "I disagree with what you just said." },
+    { "label": "objection",     "utterance": "That's incorrect, isn't it?" },
+    { "label": "objection",     "utterance": "But surely the opposite is the case." },
+    { "label": "objection",     "utterance": "Wait, that contradicts what you said earlier." },
+    { "label": "objection",     "utterance": "I don't think that's right." },
+    { "label": "objection",     "utterance": "Actually, the textbook says the opposite." },
+    { "label": "objection",     "utterance": "That isn't quite right though." },
+
+    { "label": "depth_request", "utterance": "Could you go deeper into how that works?" },
+    { "label": "depth_request", "utterance": "Tell me more about why this happens." },
+    { "label": "depth_request", "utterance": "I'd like a more detailed explanation." },
+    { "label": "depth_request", "utterance": "Can you elaborate on the mechanism?" },
+    { "label": "depth_request", "utterance": "Why is that the case under the hood?" },
+    { "label": "depth_request", "utterance": "How come this works that way?" },
+    { "label": "depth_request", "utterance": "Go further into the details please." },
+    { "label": "depth_request", "utterance": "More on that last point would help." },
+    { "label": "depth_request", "utterance": "Expand on the second step a bit." },
+    { "label": "depth_request", "utterance": "I want to understand this in more depth." },
+
+    { "label": "topic_pivot",   "utterance": "Let's move on to a different topic now." },
+    { "label": "topic_pivot",   "utterance": "Can we change the subject please?" },
+    { "label": "topic_pivot",   "utterance": "I want to skip ahead to the next section." },
+    { "label": "topic_pivot",   "utterance": "What about the chapter on traversals instead?" },
+    { "label": "topic_pivot",   "utterance": "Let's talk about something else." },
+    { "label": "topic_pivot",   "utterance": "Move on to the next topic." },
+    { "label": "topic_pivot",   "utterance": "Skip this part, let's go forward." },
+    { "label": "topic_pivot",   "utterance": "Enough of this, what's next?" },
+    { "label": "topic_pivot",   "utterance": "New topic - tell me about deletion." },
+    { "label": "topic_pivot",   "utterance": "Change topic to something more advanced." },
+
+    { "label": "example_request", "utterance": "Can you give me a concrete example?" },
+    { "label": "example_request", "utterance": "Show me an example of that please." },
+    { "label": "example_request", "utterance": "For instance, what would that look like?" },
+    { "label": "example_request", "utterance": "Like what? I need a real example." },
+    { "label": "example_request", "utterance": "Could you give me an example of how this is used?" },
+    { "label": "example_request", "utterance": "What would that look like in practice?" },
+    { "label": "example_request", "utterance": "An example would really help here." },
+    { "label": "example_request", "utterance": "Could you show me a real-world example?" },
+    { "label": "example_request", "utterance": "Give me a sample to work through." },
+    { "label": "example_request", "utterance": "Can I see a worked example of this?" }
+  ]
+}
